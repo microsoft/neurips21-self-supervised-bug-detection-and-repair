@@ -1,0 +1,19 @@
+# YAML 1.2
+---
+authors:
+  -
+    family-names: Allamanis
+    given-names: Miltiadis
+    orcid: "https://orcid.org/0000-0002-5819-9900"
+  -
+    family-names: Jackson-Flux
+    given-names: Henry
+  -
+    family-names: Brockschmidt
+    given-names: Marc
+cff-version: "1.1.0"
+message: "If you use parts of this repository, please cite it using these metadata."
+repository-code: "https://github.com/microsoft/neurips21-self-supervised-bug-detection-and-repair"
+license: MIT
+title: "Self-Supervised Bug Detection and Repair"
+...
