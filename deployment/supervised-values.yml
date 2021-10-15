@@ -1,0 +1,22 @@
+
+trainSelectorModel: false
+useDummyDataPipeline: false
+dataPipelineWorkers: 0
+useRandomBugSelector: true
+
+runConfig:
+    detector:
+        modelName: "gnn-mlp"
+        hidden_state_size: 256
+        dropout_rate: 0.2
+        node_representations:
+            token_splitting: "subtoken"
+            vocabulary_size: 15000
+            max_num_subtokens: 6
+            subtoken_combination: "max"
+    sample_buffer_ttl: 10000
+    training:
+        gradientClipNorm: 0.5
+        patience: 10
+        minibatchSize: 300
+        useDetectorValidation: true

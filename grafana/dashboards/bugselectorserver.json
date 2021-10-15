@@ -1,0 +1,394 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": null,
+            "filterable": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "7.2.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(1.0, sum(rate(BugSelectorServer_incoming_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Max",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(BugSelectorServer_incoming_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "95th quantile",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(BugSelectorServer_incoming_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Median",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.1, sum(rate(BugSelectorServer_incoming_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Fastest 10%",
+          "refId": "C"
+        }
+      ],
+      "timeFrom": null,
+      "timeShift": null,
+      "title": "BugSelectorServer incoming queue wait times",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": null,
+            "filterable": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "7.2.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(1.0, sum(rate(BugSelectorServer_processing_time_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Max",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(BugSelectorServer_processing_time_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "95th quantile",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(BugSelectorServer_processing_time_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Median",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.1, sum(rate(BugSelectorServer_processing_time_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Fastest 10%",
+          "refId": "C"
+        }
+      ],
+      "timeFrom": null,
+      "timeShift": null,
+      "title": "BugSelectorServer processing time",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": null,
+            "filterable": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "7.2.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(1.0, sum(rate(BugSelectorServer_outgoing_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Max",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(BugSelectorServer_outgoing_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "95th quantile",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(BugSelectorServer_outgoing_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Median",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.1, sum(rate(BugSelectorServer_outgoing_latency_bucket[15s])) by (le))",
+          "interval": "",
+          "legendFormat": "Fastest 10%",
+          "refId": "C"
+        }
+      ],
+      "timeFrom": null,
+      "timeShift": null,
+      "title": "BugSelectorServer outgoing queue wait times",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": null,
+            "filterable": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "7.2.0",
+      "targets": [
+        {
+          "expr": "BugSelectorServer_incoming_messages_total",
+          "format": "time_series",
+          "interval": "",
+          "legendFormat": "Incoming messages",
+          "refId": "A"
+        },
+        {
+          "expr": "BugSelectorServer_outgoing_messages_total",
+          "interval": "",
+          "legendFormat": "Outgoing messages",
+          "refId": "B"
+        }
+      ],
+      "timeFrom": null,
+      "timeShift": null,
+      "title": "Message count ",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "7.2.0",
+      "targets": [
+        {
+          "expr": "BugSelectorServer_data_queue",
+          "interval": "",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "timeFrom": null,
+      "timeShift": null,
+      "title": "Data queue size",
+      "type": "stat"
+    }
+  ],
+  "schemaVersion": 26,
+  "style": "dark",
+  "tags": [],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "BugSelectorServer",
+  "uid": "h0ILQcKMz",
+  "version": 2
+}

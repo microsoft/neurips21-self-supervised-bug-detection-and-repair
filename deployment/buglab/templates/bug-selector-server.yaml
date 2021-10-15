@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bug-selector-server
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 5556
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: bug-selector-server
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bug-selector-server
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+    selector:
+        matchLabels:
+            app: {{ include "buglab.fullname" . }}
+            tier: bug-selector-server
+    strategy:
+        type: Recreate
+    template:
+        metadata:
+            labels:
+                app: {{ include "buglab.fullname" . }}
+                tier: bug-selector-server
+            annotations:
+                prometheus.io/scrape: "true"
+                prometheus.io/path: /
+                prometheus.io/port: "8003"
+        spec:
+            containers:
+                -   image: {{ .Values.imageName }}
+                    imagePullPolicy: Always
+                    {{- if .Values.enable_ptrace }}
+                    securityContext:
+                        capabilities:
+                            add:
+                            - SYS_PTRACE
+                    {{- end }}
+                    command: [ "python3.8" ]
+                    {{- if .Values.useRandomBugSelector }}
+                    name: random-bug-selector-server
+                    args:
+                        - "-m"
+                        - "buglab.controllers.helper.randombugselectorserver"
+                        - "tcp://*:5556"
+                    {{- else }}
+                    name: bug-selector-server
+                    args:
+                        - "-m"
+                        - "buglab.controllers.bugselectorserver"
+                        - "--bug-selector-server-address"
+                        - "tcp://*:5556"
+                        - "--model-sync-server"
+                        - "tcp://selector-model-server:6001"
+                        - "--num-rewrites-per-sample"
+                        - "{{ .Values.runConfig.selector.num_rewrites_per_sample}}"
+                        - "--epsilon"
+                        - "{{ .Values.runConfig.selector.sample_epsilon}}"
+                        - "--temperature-scaling"
+                        - "{{ .Values.runConfig.selector.sample_temperature}}"
+                    {{- end }}
+                    ports:
+                        - containerPort: 5556
+                          name: bug-selector
+                        - containerPort: 8003
+                          name: prometheus
+                    resources:
+                        requests:
+                          cpu: "1"
+                          memory: "1Gi"
+                        limits:
+                          cpu: "10"
+                          memory: "30Gi"

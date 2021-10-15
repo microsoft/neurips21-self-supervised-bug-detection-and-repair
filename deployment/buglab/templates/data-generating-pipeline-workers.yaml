@@ -1,0 +1,61 @@
+{{ if .Values.useDummyDataPipeline }}
+{{else}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-pipeline-worker
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dataPipelineWorkers }}
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: data-pipeline-worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: data-pipeline-worker
+      annotations:
+          prometheus.io/scrape: "false"
+          prometheus.io/path: /
+          prometheus.io/port: "8001"
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.enable_ptrace }}
+        securityContext:
+          capabilities:
+            add:
+            - SYS_PTRACE
+        {{- end }}
+        name: data-pipeline-worker
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.datageneratingpipeline_worker"
+          - "--num-semantics-preserving-transforms"
+          - "{{ .Values.numSemanticPreservingTransforms }}"
+          - "--deduplication-server"
+          - "tcp://deduplication-server:5555"
+          - "--bug-selector-server"
+          - "tcp://bug-selector-server:5556"
+          - "--data-publishing-proxy-address"
+          - "tcp://data-pipeline-proxy-producers:5557"
+          - "--work-coordinator-address"
+          - "tcp://data-generating-pipeline-coordinator:5550"
+        ports:
+          - containerPort: 8001
+            name: prometheus
+        resources:
+            requests:
+              cpu: "1.0"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+{{ end }}

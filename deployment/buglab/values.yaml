@@ -1,0 +1,66 @@
+# BugLab Config
+
+# General Options
+nameOverride: ""
+fullnameOverride: ""
+podAnnotations: {}
+nodeSelector: {}
+
+imageName: "XXXX.azurecr.io/buglab/buglab-base:latest"
+
+# Data Paths
+bufferHydrationPathSuffix: "YYY/main-split-train"
+trainDataPathSuffix: "YYY/main-split-train"
+validDataPathSuffix: "YYY/main-split-valid"
+
+
+trainSelectorModel: true
+useDummyDataPipeline: false
+
+# If not useDummyDataPipeline, the following may make sense
+dataPipelineWorkers: 100
+useRandomBugSelector: false
+numSemanticPreservingTransforms: 1
+
+# Debug utils
+launchDummyPipelineSubscriber: false
+
+# Start up Prometheus and Grafana
+monitoring: true
+enable_ptrace: true
+enable_amp: false
+
+# Configurations
+runConfig:
+    detector:
+        modelName: "gnn-mlp"
+        hidden_state_size: 256
+        dropout_rate: 0.2
+        node_representations:
+            token_splitting: "subtoken"
+            vocabulary_size: 15000
+            max_num_subtokens: 6
+            subtoken_combination: "max"
+        buggy_samples_weight_spec: 1  # A float or a warmdown schedule
+                                      # (e.g. a string "warmdown(30, 0.2)" which warms-down
+                                      #  the weight from 1 to 0.2 in the first 30 epochs)
+    sample_buffer_ttl: 5
+    selector:
+        modelName: "gnn-mlp"
+        hidden_state_size: 256
+        dropout_rate: 0.2
+        node_representations:
+            token_splitting: "subtoken"
+            vocabulary_size: 15000
+            max_num_subtokens: 6
+            subtoken_combination: "max"
+        selector_loss_type: "classify-max-loss"
+        num_rewrites_per_sample: 4
+        buggy_samples_weight_spec: 1  # A float or a warmdown schedule (string)
+        sample_epsilon: 0.02
+        sample_temperature: 1
+    training:
+        gradientClipNorm: 0.5
+        patience: 10
+        minibatchSize: 300
+        useDetectorValidation: false

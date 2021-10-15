@@ -1,0 +1,7 @@
+.git/
+logs/
+.editorconfig
+*.pkl.gz
+*.html
+etc/
+tests/

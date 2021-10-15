@@ -1,0 +1,12 @@
+<snippet style="background-color:rgb({{#contains_ground_range}}124, 252, 0{{/contains_ground_range}}{{^contains_ground_range}}{{#contains_predicted_range}}255,100,100{{/contains_predicted_range}}{{^contains_predicted_range}}200, 240, 240{{/contains_predicted_range}}{{/contains_ground_range}});">{{text}}{{#target_ranges}}<probannot>{{assigned_prob}}</probannot>{{/target_ranges}}<annot>
+<div class="container">{{#target_ranges}}
+<h5>Bug at Location Prob: {{assigned_prob}}</h5> {{#is_ground_range}}<kbd>Ground Truth</kbd>{{/is_ground_range}}<p>{{range}}</p>
+        <table class="table table-sm table-striped">
+        <tr><th scope="col">Rewrite Op</th><th scope="col">Probability Given Location</th></tr>
+        {{#rewrites}}
+            <tr {{#is_correct}}class="table-success"{{/is_correct}}{{^is_correct}}{{#is_predicted}}class="table-danger"{{/is_predicted}}{{/is_correct}}>
+                <td>{{rewrite}}</td>
+                <td>{{prob}}</td>
+            </tr>
+        {{/rewrites}}
+</table><hr/>{{/target_ranges}}</div></annot></snippet>

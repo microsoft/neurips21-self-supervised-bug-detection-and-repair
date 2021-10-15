@@ -1,0 +1,126 @@
+{{ if .Values.useDummyDataPipeline }}
+{{else}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-generating-pipeline-coordinator
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: data-generating-pipeline-coordinator
+      port: 5550
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: data-pipeline
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-pipeline-proxy-producers
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: data-pipeline-proxy-producers
+      port: 5557
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: data-pipeline
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-pipeline-consumers
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: data-pipeline-consumers
+      port: 5558
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: data-pipeline
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deduplication-server
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: deduplication-server
+      port: 5555
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: data-pipeline
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-pipeline
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: data-pipeline
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: data-pipeline
+      annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/path: /
+          prometheus.io/port: "8004"
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.enable_ptrace }}
+        securityContext:
+          capabilities:
+            add:
+            - SYS_PTRACE
+        {{- end }}
+        name: data-pipeline-coordinator
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.datageneratingpipeline_coordinator"
+          - "--bug-selector-server-address"
+          - "tcp://bug-selector-server:5556"
+          - "--work-distribution-server-port"
+          - "5550"
+          - "/data/oct18/mainPrjs.txt"
+        ports:
+        - containerPort: 5550
+        - containerPort: 5555
+        - containerPort: 5557
+        - containerPort: 5558
+        - containerPort: 8004
+          name: prometheus
+        volumeMounts:
+        - name: data-pipeline-input-data
+          mountPath: /data/
+        resources:
+            requests:
+              cpu: "100m"
+              memory: "100Mi"
+            limits:
+              cpu: "500m"
+              memory: "2Gi"
+      volumes:
+      - name: data-pipeline-input-data
+        persistentVolumeClaim:
+            claimName: data
+{{ end }}

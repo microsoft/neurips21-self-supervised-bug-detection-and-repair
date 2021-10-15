@@ -1,0 +1,218 @@
+{{ if .Values.monitoring }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "server"
+    app: prometheus
+  name: prometheus-server
+  annotations:
+    {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "server"
+    app: prometheus
+  name: prometheus-server
+data:
+  prometheus.yml: |
+    global:
+      evaluation_interval: 1m
+      scrape_interval: 10s
+      scrape_timeout: 10s
+    scrape_configs:
+    - job_name: prometheus
+      static_configs:
+      - targets:
+        - localhost:9090
+    - job_name: BugLab
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - action: keep
+        regex: true
+        source_labels:
+        - __meta_kubernetes_pod_annotation_prometheus_io_scrape
+      - action: keep
+        regex: {{.Release.Namespace}}
+        source_labels:
+        - __meta_kubernetes_namespace
+      - action: replace
+        regex: (.+)
+        source_labels:
+        - __meta_kubernetes_pod_annotation_prometheus_io_path
+        target_label: __metrics_path__
+      - action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        source_labels:
+        - __address__
+        - __meta_kubernetes_pod_annotation_prometheus_io_port
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_namespace
+        target_label: kubernetes_namespace
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_pod_name
+        target_label: kubernetes_pod_name
+      - action: drop
+        regex: Pending|Succeeded|Failed
+        source_labels:
+        - __meta_kubernetes_pod_phase
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "server"
+    app: prometheus
+  name: prometheus-server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: "8Gi"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "server"
+    app: prometheus
+  name: prometheus-server
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - pods
+      - ingresses
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "server"
+    app: prometheus
+  name: prometheus-server
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-server
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "server"
+    app: prometheus
+  name: prometheus-server
+spec:
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 9090
+  selector:
+    component: "server"
+    app: prometheus
+  sessionAffinity: None
+  type: "ClusterIP"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "server"
+    app: prometheus
+  name: prometheus-server
+spec:
+  selector:
+    matchLabels:
+      component: "server"
+      app: prometheus
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        component: "server"
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus-server
+      containers:
+
+        - name: prometheus-server
+          image: "quay.io/prometheus/prometheus:v2.22.1"
+          imagePullPolicy: "IfNotPresent"
+          args:
+            - --storage.tsdb.retention.time=15d
+            - --config.file=/etc/config/prometheus.yml
+            - --storage.tsdb.path=/data
+            - --web.console.libraries=/etc/prometheus/console_libraries
+            - --web.console.templates=/etc/prometheus/consoles
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 30
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 30
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            {}
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config
+            - name: storage-volume
+              mountPath: /data
+              subPath: ""
+      securityContext:
+        fsGroup: 65534
+        runAsGroup: 65534
+        runAsNonRoot: true
+        runAsUser: 65534
+      terminationGracePeriodSeconds: 300
+      volumes:
+        - name: config-volume
+          configMap:
+            name: prometheus-server
+        - name: storage-volume
+          persistentVolumeClaim:
+            claimName: prometheus-server
+{{ end }}

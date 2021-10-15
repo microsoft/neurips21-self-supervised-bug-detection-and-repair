@@ -1,0 +1,36 @@
+{{ if .Values.launchDummyPipelineSubscriber }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dummy-pipeline-consumer
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: dummy-pipeline-consumer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: dummy-pipeline-consumer
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        name: dummy-pipeline-consumer
+        imagePullPolicy: IfNotPresent
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.helper.dummydatasubscriber"
+          - "--data-generating-pipeline-address"
+          - "tcp://data-pipeline-consumers:5558"
+        resources:
+            limits:
+                cpu: "0.5"
+            requests:
+                cpu: "0.1"
+{{ end }}

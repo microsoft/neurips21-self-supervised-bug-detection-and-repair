@@ -1,0 +1,96 @@
+{{ if .Values.monitoring }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "grafana"
+data:
+  prometheus.yaml: |-
+    apiVersion: 1
+    datasources:
+    - name: Prometheus
+      type: prometheus
+      url: http://prometheus-server.{{ .Release.Namespace }}:80
+      isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "grafana"
+data:
+  dashboards.yaml: |-
+    apiVersion: 1
+    providers:
+      - name: Dashboards
+        orgId: 1
+        type: file
+        disableDeletion: true
+        updateIntervalSeconds: 5
+        allowUiUpdates: true
+        options:
+          path: /etc/dashboards
+          foldersFromFilesStructure: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+    component: "grafana"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      name: grafana
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+        - name: grafana
+          containerPort: 3000
+        resources:
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+        volumeMounts:
+          - mountPath: /var/lib/grafana
+            name: grafana-storage
+          - mountPath: /etc/grafana/provisioning/datasources
+            name: grafana-datasources
+            readOnly: false
+          - mountPath: /etc/grafana/provisioning/dashboards
+            name: grafana-dashboard-config
+            readOnly: false
+          - mountPath: /etc/dashboards
+            name: grafana-dashboard-data
+            readOnly: false
+      volumes:
+        - name: grafana-storage
+          emptyDir: {}
+        - name: grafana-datasources
+          configMap:
+              defaultMode: 420
+              name: grafana-datasources
+        - name: grafana-dashboard-config
+          configMap:
+              defaultMode: 420
+              name: grafana-dashboards
+        - name: grafana-dashboard-data
+          persistentVolumeClaim:
+            claimName: grafana-data
+{{ end }}

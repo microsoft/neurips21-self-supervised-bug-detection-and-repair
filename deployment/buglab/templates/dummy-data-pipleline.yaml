@@ -1,0 +1,54 @@
+{{ if .Values.useDummyDataPipeline }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-pipeline
+  labels:
+    app: {{ include "buglab.fullname" . }}
+spec:
+  ports:
+    - port: 5557
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: data-pipeline
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-pipeline
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: data-pipeline
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: data-pipeline
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        name: dummy-data-pipeline
+        imagePullPolicy: IfNotPresent
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.helper.dummydatageneratingpipeline"
+          - "/data/{{ .Values.trainDataPathSuffix }}"
+        ports:
+        - containerPort: 5557
+          name: data-pipeline
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data/
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+            claimName: data
+{{ end }}

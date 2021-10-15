@@ -1,0 +1,10 @@
+failOnInitError: false
+
+tolerations:
+  - key: "compute"
+    operator: "Equal"
+    value: "gpu"
+    effect: "NoSchedule"
+
+nodeSelector:
+  compute: gpu

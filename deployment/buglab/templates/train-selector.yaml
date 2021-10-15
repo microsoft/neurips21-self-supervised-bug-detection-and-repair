@@ -1,0 +1,107 @@
+{{ if .Values.trainSelectorModel }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: selector-model-server
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: selector-model-server
+      port: 6001
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: train-selector
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bug-detector-scored-data-server
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: bug-detector-scored-data-server
+      port: 5559
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: train-selector
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: train-selector
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: train-selector
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: train-selector
+      annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/path: /
+          prometheus.io/port: "8001"
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        name: train-selector
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.enable_ptrace }}
+        securityContext:
+          capabilities:
+            add:
+            - SYS_PTRACE
+        {{- end }}
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.trainbugselector"
+          - "/etc/run-config/runConfig.yml"
+          - /data/{{ .Values.bufferHydrationPathSuffix }}
+          - /data/models/{{ include "buglab.fullname" . }}/selector.pkl.gz
+          {{- if .Values.enable_amp }}
+          - "--amp"
+          {{- end }}
+        ports:
+        - containerPort: 6001
+          name: model-server
+        - containerPort: 5559
+          name: detector-scorer
+        - containerPort: 8001
+          name: prometheus
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+        - name: config-volume
+          mountPath: /etc/run-config
+        resources:
+            requests:
+              cpu: "3000m"
+              memory: "30Gi"
+            limits:
+              cpu: "5000m"
+              memory: "65Gi"
+              nvidia.com/gpu: 1
+      tolerations:
+      - key: "compute"
+        operator: "Equal"
+        value: "gpu"
+        effect: "NoSchedule"
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: data
+      - name: config-volume
+        configMap:
+            name: buglab-run-config
+{{ end }}

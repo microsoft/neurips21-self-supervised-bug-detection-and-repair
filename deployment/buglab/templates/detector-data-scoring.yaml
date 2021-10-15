@@ -1,0 +1,70 @@
+{{ if .Values.trainSelectorModel }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: detector-data-scoring
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: detector-data-scoring
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: detector-data-scoring
+      annotations:
+          prometheus.io/scrape: "true"
+          prometheus.io/path: /
+          prometheus.io/port: "8000"
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        name: detector-data-scoring
+        {{- if .Values.enable_ptrace }}
+        securityContext:
+          capabilities:
+            add:
+            - SYS_PTRACE
+        {{- end }}
+        imagePullPolicy: IfNotPresent
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.detectordatascoringworker"
+          - "/data/{{ .Values.bufferHydrationPathSuffix }}"
+          - "--data-pipeline-address"
+          - "tcp://data-pipeline-consumers:5558"
+          - "--target-queue-address"
+          - "tcp://bug-detector-scored-data-server:5559"
+          - "--model-server-address"
+          - "tcp://detector-model-server:6000"
+          - "--sequential"
+        ports:
+          - containerPort: 8000
+            name: prometheus
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data/
+        resources:
+            requests:
+              cpu: "3"
+              memory: "50Gi"
+            limits:
+              cpu: "4"
+              memory: "60Gi"
+              nvidia.com/gpu: 1
+      tolerations:
+        - key: "compute"
+          operator: "Equal"
+          value: "gpu"
+          effect: "NoSchedule"
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+            claimName: data
+{{ end }}

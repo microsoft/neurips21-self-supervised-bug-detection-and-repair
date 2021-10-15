@@ -110,11 +110,11 @@ ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
+# Spyder package_name settings
 .spyderproject
 .spyproject
 
-# Rope project settings
+# Rope package_name settings
 .ropeproject
 
 # mkdocs documentation
@@ -127,3 +127,25 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Pycharm
+.idea
+
+# VSCode
+.vscode
+
+## buglab-specific
+*.pkl.gz
+azure_auth.json
+*.dot
+*.pdf
+*.msgpack
+*.msgpack.gz
+*.msgpack.l.gz
+
+## terraform
+azurek8s
+*.plan
+*.terraform
+*.tfstate
+*.tfstate.backup

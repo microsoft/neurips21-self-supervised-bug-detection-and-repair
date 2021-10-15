@@ -1,0 +1,36 @@
+{{ if .Values.monitoring }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+    name: {{ include "buglab.fullname" . }}-grafana
+spec:
+    capacity:
+        storage: 50Mi
+    accessModes:
+        - ReadWriteMany
+    persistentVolumeReclaimPolicy: Retain  # "Delete" is not supported in static provisioning
+    mountOptions:
+        - -o allow_other  # Lets the user "buglab" see the data.
+    csi:
+        driver: blob.csi.azure.com
+        readOnly: false
+        volumeHandle: grafana-volume-handle
+        volumeAttributes:
+            containerName: grafana
+        nodeStageSecretRef:
+            name: azure-secret
+            namespace: default
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+    name: grafana-data
+spec:
+    accessModes:
+        - ReadWriteMany
+    resources:
+        requests:
+            storage: 50Mi
+    volumeName: {{ include "buglab.fullname" . }}-grafana
+    storageClassName: ""
+{{ end }}

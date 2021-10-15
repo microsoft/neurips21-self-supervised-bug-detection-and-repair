@@ -1,0 +1,173 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: detector-training-data-buffer
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: detector-training-data-buffer
+      port: 5560
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: detector-training-data
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: detector-training-data
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: detector-training-data
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: detector-training-data
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /
+        prometheus.io/port: "8003"
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        name: detector-training-data
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.enable_ptrace }}
+        securityContext:
+            capabilities:
+                add:
+                - SYS_PTRACE
+        {{- end }}
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.detectortrainingdatabuffer"
+          - /data/{{ .Values.bufferHydrationPathSuffix }}
+          - "--data-pipeline-address"
+          - "tcp://data-pipeline-consumers:5558"
+          - "--sample-ttl"
+          - "{{ .Values.runConfig.sample_buffer_ttl }}"
+        ports:
+        - containerPort: 6000
+          name: model-server
+        - containerPort: 8002
+          name: prometheus
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data/
+        - name: config-volume
+          mountPath: /etc/run-config
+        resources:
+            requests:
+              cpu: "1000m"
+              memory: "5Gi"
+            limits:
+              cpu: "4000m"
+              memory: "20Gi"
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+            claimName: data
+      - name: config-volume
+        configMap:
+            name: buglab-run-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: detector-model-server
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: detector-model-server
+      port: 6000
+  selector:
+    app: {{ include "buglab.fullname" . }}
+    tier: train-detector
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: train-detector
+  labels:
+    {{- include "buglab.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "buglab.fullname" . }}
+      tier: train-detector
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ include "buglab.fullname" . }}
+        tier: train-detector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /
+        prometheus.io/port: "8002"
+    spec:
+      containers:
+      - image: {{ .Values.imageName }}
+        name: train-detector
+        imagePullPolicy: IfNotPresent
+        {{- if .Values.enable_ptrace }}
+        securityContext:
+            capabilities:
+                add:
+                - SYS_PTRACE
+        {{- end }}
+        command: ["python3.8"]
+        args:
+          - "-m"
+          - "buglab.controllers.trainbugdetector"
+          - /data/{{ .Values.bufferHydrationPathSuffix }}
+          - "/etc/run-config/runConfig.yml"
+          - "/data/{{ .Values.validDataPathSuffix }}"
+          - /data/models/{{ include "buglab.fullname" . }}/detector.pkl.gz
+          - "--training-data-buffer-address"
+          - "tcp://detector-training-data-buffer:5560"
+          {{- if .Values.enable_amp }}
+          - "--amp"
+          {{- end }}
+        ports:
+        - containerPort: 6000
+          name: model-server
+        - containerPort: 8002
+          name: prometheus
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data/
+        - name: config-volume
+          mountPath: /etc/run-config
+        resources:
+            requests:
+              cpu: "3000m"
+              memory: "30Gi"
+            limits:
+              cpu: "5000m"
+              memory: "65Gi"
+              nvidia.com/gpu: 1
+      tolerations:
+      - key: "compute"
+        operator: "Equal"
+        value: "gpu"
+        effect: "NoSchedule"
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+            claimName: data
+      - name: config-volume
+        configMap:
+            name: buglab-run-config

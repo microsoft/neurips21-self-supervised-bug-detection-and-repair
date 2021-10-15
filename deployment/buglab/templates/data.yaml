@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "buglab.fullname" . }}-data
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain  # "Delete" is not supported in static provisioning
+  mountOptions:
+      - -o allow_other  # Lets the user "buglab" see the data.
+  csi:
+    driver: blob.csi.azure.com
+    readOnly: false
+    volumeHandle: data-volume-handle
+    volumeAttributes:
+        containerName: data
+    nodeStageSecretRef:
+        name: azure-secret
+        namespace: default
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+    name: data
+spec:
+    accessModes:
+        - ReadWriteMany
+    resources:
+        requests:
+            storage: 1Gi
+    volumeName: {{ include "buglab.fullname" . }}-data
+    storageClassName: ""
