@@ -73,7 +73,6 @@ class SeqBugLabModule(ModuleWithMetrics):
         intermediate_dimension: int,
         dropout_rate: float,
         rewrite_vocabulary_size: int,
-        pair_selector_hidden_size: int,
         layer_type: Literal["great", "rat", "transformer", "gru"] = "great",
         buggy_samples_weight_schedule: Callable[[int], float] = lambda _: 1.0,
         generator_loss_type: Optional[str] = "norm-kl",
@@ -138,8 +137,8 @@ class SeqBugLabModule(ModuleWithMetrics):
         self._buggy_samples_weight_schedule = buggy_samples_weight_schedule
 
         self._text_repair_module = TextRepairModule(embedding_dim, rewrite_vocabulary_size)
-        self._varmisuse_module = SingleCandidateNodeSelectorModule()
-        self._argswap_module = CandidatePairSelectorModule(embedding_dim, pair_selector_hidden_size)
+        self._varmisuse_module = SingleCandidateNodeSelectorModule(embedding_dim)
+        self._argswap_module = CandidatePairSelectorModule(embedding_dim)
 
     def _reset_module_metrics(self) -> None:
         if not hasattr(self, "_epoch_idx"):
@@ -403,7 +402,6 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
         representation_size: int,
         max_subtoken_vocab_size: int,
         dropout_rate: float,
-        pair_selector_hidden_size: int,
         layer_type: Literal["great", "rat", "transformer", "gru"] = "great",
         max_seq_size: int = 500,
         num_heads: int = 8,
@@ -422,7 +420,6 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
         self.__dropout_rate = dropout_rate
         self.__representation_size = representation_size
         self.__layer_type = layer_type
-        self.__pair_selector_hidden_size = pair_selector_hidden_size
 
         self.__max_seq_size = max_seq_size
         self.__token_embedder = StrElementRepresentationModel(
@@ -630,7 +627,6 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
             intermediate_dimension=self.__intermediate_dimension_size,
             dropout_rate=self.__dropout_rate,
             rewrite_vocabulary_size=len(self._target_rewrite_ops),
-            pair_selector_hidden_size=self.__pair_selector_hidden_size,
             layer_type=self.__layer_type,
             buggy_samples_weight_schedule=self.__buggy_samples_weight_schedule,
             generator_loss_type=self.__generator_loss_type,

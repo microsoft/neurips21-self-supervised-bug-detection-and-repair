@@ -57,7 +57,6 @@ class GnnBugLabModule(ModuleWithMetrics):
         self,
         gnn: GraphNeuralNetwork,
         rewrite_vocabulary_size: int,
-        pair_selector_hidden_size: int,
         use_all_gnn_layer_outputs: bool = False,
         generator_loss_type: Optional[str] = "norm-kl",
         buggy_samples_weight_schedule: Callable[[int], float] = lambda _: 1.0,
@@ -82,8 +81,8 @@ class GnnBugLabModule(ModuleWithMetrics):
         self._buggy_samples_weight_schedule = buggy_samples_weight_schedule
 
         self._text_repair_module = TextRepairModule(output_state_dim, rewrite_vocabulary_size)
-        self._varmisuse_module = SingleCandidateNodeSelectorModule()
-        self._argswap_module = CandidatePairSelectorModule(output_state_dim, pair_selector_hidden_size)
+        self._varmisuse_module = SingleCandidateNodeSelectorModule(output_state_dim)
+        self._argswap_module = CandidatePairSelectorModule(output_state_dim)
 
     @property
     def use_all_gnn_layer_outputs(self):
@@ -327,7 +326,6 @@ class GnnBugLabModel(AbstractNeuralModel[BugLabData, BaseTensorizedBugLabGnn, Gn
     def __init__(
         self,
         gnn_model: GraphNeuralNetworkModel,
-        pair_selector_hidden_size: int,
         use_all_gnn_layer_outputs: bool = False,
         generator_loss_type: Optional[str] = "classify-max-loss",
         buggy_samples_weight_schedule: Callable[[int], float] = lambda _: 1.0,
@@ -335,7 +333,6 @@ class GnnBugLabModel(AbstractNeuralModel[BugLabData, BaseTensorizedBugLabGnn, Gn
         super().__init__()
         self._init()
         self.__gnn_model = gnn_model
-        self.__pair_selector_hidden_size = pair_selector_hidden_size
         self.__use_all_gnn_layer_outputs = use_all_gnn_layer_outputs
         self.__generator_loss_type = generator_loss_type
         self.__buggy_samples_weight_schedule = buggy_samples_weight_schedule
@@ -356,7 +353,6 @@ class GnnBugLabModel(AbstractNeuralModel[BugLabData, BaseTensorizedBugLabGnn, Gn
         return GnnBugLabModule(
             self.__gnn_model.build_neural_module(),
             rewrite_vocabulary_size=len(self._target_rewrite_ops),
-            pair_selector_hidden_size=self.__pair_selector_hidden_size,
             use_all_gnn_layer_outputs=self.__use_all_gnn_layer_outputs,
             generator_loss_type=self.__generator_loss_type,
             buggy_samples_weight_schedule=self.__buggy_samples_weight_schedule,

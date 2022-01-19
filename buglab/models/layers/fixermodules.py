@@ -4,11 +4,17 @@ import torch
 import torch.nn as nn
 from ptgnn.baseneuralmodel import ModuleWithMetrics
 
+from buglab.models.layers.mlp import MLP
 
 class TextRepairModule(ModuleWithMetrics):
     def __init__(self, input_representation_size: int, rewrite_vocab_size: int):
         super().__init__()
         self.__text_rewrite_embeddings = nn.Embedding(rewrite_vocab_size, embedding_dim=input_representation_size)
+        self.__text_rewrite_scorer = MLP(
+            input_dim=2 * input_representation_size,
+            out_dim=1,
+            hidden_layer_dims=[input_representation_size],
+        )
 
     def _reset_module_metrics(self) -> None:
         self.__num_correct = 0
@@ -28,7 +34,9 @@ class TextRepairModule(ModuleWithMetrics):
         :param candidate_rewrites: [N]
         """
         embedded_target_rewrites = self.__text_rewrite_embeddings(candidate_rewrites)  # [N, D]
-        return torch.einsum("nd,nd->n", embedded_target_rewrites, target_rewrite_node_representations)  # [N]
+        return self.__text_rewrite_scorer(
+            torch.cat((embedded_target_rewrites, target_rewrite_node_representations), dim=-1)
+        ).squeeze(-1)
 
     def forward(self, rewrite_logprobs, targets, selected_fixes=None):
         """
@@ -46,14 +54,23 @@ class TextRepairModule(ModuleWithMetrics):
 
 
 class SingleCandidateNodeSelectorModule(ModuleWithMetrics):
-    # TODO: This could be arbitrarily more complex, instead of computing the inner product of the representations.
+    def __init__(self, input_representation_size: int):
+        super().__init__()
+        self.__candidate_scorer = MLP(
+            input_dim=2 * input_representation_size,
+            out_dim=1,
+            hidden_layer_dims=[input_representation_size],
+        )
 
     def compute_per_slot_log_probability(self, slot_representations_per_target, target_nodes_representations):
         """
         :param slot_representations_per_target:  [N, D]
         :param target_nodes_representations: [N, D]
         """
-        return torch.einsum("nd,nd->n", slot_representations_per_target, target_nodes_representations)  # [N]
+        # Compute candidate score by applying MLP to combination of slot and candidate representations:
+        return self.__candidate_scorer(
+            torch.cat((slot_representations_per_target, target_nodes_representations), dim=-1)
+        ).squeeze(-1)
 
     def _reset_module_metrics(self) -> None:
         self.__num_correct = 0
@@ -82,28 +99,29 @@ class SingleCandidateNodeSelectorModule(ModuleWithMetrics):
 
 
 class CandidatePairSelectorModule(ModuleWithMetrics):
-    def __init__(self, input_node_representation: int, hidden_layer_size: int):
+    def __init__(self, input_node_representation: int):
         super().__init__()
-        self.__pair_to_slot_scoring_l1 = nn.Linear(
-            in_features=3 * input_node_representation, out_features=hidden_layer_size
+        self.__pair_scorer = MLP(
+            input_dim=3 * input_node_representation,
+            out_dim=1,
+            hidden_layer_dims=[input_node_representation],
         )
-        self.__pair_to_slot_scoring_lout = nn.Linear(hidden_layer_size, 1, bias=False)
 
     def compute_per_pair_logits(self, slot_representations_per_pair, pair_representations):
         """
         :param slot_representations_per_pair: [N, D]
         :param pair_representations: [N, 2, D]
         """
-        pair_representations_flat = pair_representations.reshape(pair_representations.shape[0], -1)  # [N, 2*D]
-        pair_representations_flat = torch.cat(
-            (pair_representations_flat, slot_representations_per_pair), dim=-1
-        )  # [N, 3*D]
-
-        return self.__pair_to_slot_scoring_lout(
-            torch.sigmoid(self.__pair_to_slot_scoring_l1(pair_representations_flat))
-        ).squeeze(
-            -1
-        )  # [N]
+        # Compute candidate score by applying MLP to combination of slot and pairs representations:
+        return self.__pair_scorer(
+            torch.cat(
+                (
+                    slot_representations_per_pair,
+                    pair_representations.reshape(pair_representations.shape[0], 2 * self._input_dim),
+                ),
+                dim=-1,
+            )
+        ).squeeze(-1)
 
     def _reset_module_metrics(self) -> None:
         self.__num_correct = 0
