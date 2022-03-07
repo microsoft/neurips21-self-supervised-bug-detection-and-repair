@@ -1,19 +1,66 @@
-import re
-from os import PathLike
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
-
-import numpy as np
-from dpu_utils.codeutils import split_identifier_into_parts
-from dpu_utils.mlutils import Vocabulary
-from ptgnn.neuralmodels.gnn import GraphData
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, TypeVar, Union
 from typing_extensions import TypedDict
 
+import itertools
+import numpy as np
+import re
+from dpu_utils.codeutils import split_identifier_into_parts
+from dpu_utils.mlutils import Vocabulary
+from os import PathLike
+from ptgnn.neuralmodels.gnn import GraphData
+
 from buglab.utils.msgpackutils import load_msgpack_l_gz
+
+HyperedgeMetadata = TypeVar("HyperedgeMetadata")
+TensorizedHyperedgeMetadata = TypeVar("TensorizedHyperedgeMetadata")
+TNodeData = TypeVar("TNodeData")
+TensorizedTypeData = TypeVar("TensorizedTypeData")
+TensorizedArgData = TypeVar("TensorizedArgData")
+
+
+class HyperedgeData(NamedTuple):
+    hyperedge_type: str
+    args: List[str]
+    node_idxs: List[int]
+    metadata: Optional[HyperedgeMetadata]
+
+
+class TensorizedHyperedgeData(NamedTuple):
+    type_name_unq_idx: int
+    arg_name_unq_idxs: List[int]
+    node_idxs: List[int]
+    metadata: Optional[TensorizedHyperedgeMetadata]
+
+
+class HypergraphData(NamedTuple):
+    hyperedges: List[HyperedgeData]
+    node_information: List[TNodeData]
+    reference_nodes: Dict[str, List[int]]
+
+
+TTensorizedNodeData = TypeVar("TTensorizedNodeData")
+
+
+class TensorizedHypergraphData(NamedTuple):
+    num_nodes: int
+    node_tensorized_unq_data: List[TTensorizedNodeData]
+    node_tensorized_data_idxs: List[TTensorizedNodeData]
+    reference_nodes: Dict[str, np.ndarray]
+    hyperedges: List[TensorizedHyperedgeData]
+    hyperedge_unq_types: List[TensorizedTypeData]
+    hyperedge_unq_args: List[TensorizedArgData]
+
+
+class BuglabHyperedge(TypedDict):
+    name: str
+    docstring: Optional[str]
+    args: Dict[str, List[int]]
 
 
 class BugLabGraph(TypedDict):
     nodes: List[str]
     edges: Dict[str, List[Union[Tuple[int, int], Tuple[int, int, str]]]]
+    hyperedges: Optional[List[BuglabHyperedge]]
     path: str
     text: str
     reference_nodes: List[int]
@@ -29,13 +76,13 @@ class BugLabGraph(TypedDict):
 
         reference_nodes = set(data["reference_nodes"])
         colored_nodes = [
-            ("red", {target_idx for _, target_idx in data["edges"]["PossibleType"]}),
-            ("orange", {target_idx for _, target_idx in data["edges"]["OccurrenceOf"]}),
-            ("blue", {target_idx for _, target_idx in data["edges"]["CandidateCall"]}),
-            ("yellow", {target_idx for _, target_idx in data["edges"]["CandidateCallDoc"]}),
+            ("red", {target_idx for _, target_idx in data["edges"].get("PossibleType", [])}),
+            ("orange", {target_idx for _, target_idx in data["edges"].get("OccurrenceOf", [])}),
+            ("blue", {target_idx for _, target_idx in data["edges"].get("CandidateCall", [])}),
+            ("yellow", {target_idx for _, target_idx in data["edges"].get("CandidateCallDoc", [])}),
         ]
 
-        token_node_idxs = {target_idx for _, target_idx in data["edges"]["NextToken"]}
+        token_node_idxs = {target_idx for _, target_idx in data["edges"].get("NextToken", [])}
 
         with open(filepath, "w") as f:
             f.write("digraph {\n\tcompound=true;")
@@ -88,6 +135,20 @@ class BugLabGraph(TypedDict):
                         label = f"{edge_name} ({label})"
 
                     f.write(f'\tnode{from_idx} -> node{to_idx} [xlabel="{label}", {edge_style}];\n')
+
+            # Hyperedges
+            next_node_idx = len(data["nodes"])
+            for hyperedge in data["hyperedges"]:
+                hyperedge: BuglabHyperedge
+                hyperedge_node_idx = next_node_idx
+                next_node_idx += 1
+                f.write(
+                    f'\tnode{hyperedge_node_idx}[shape="rectangle", label="{hyperedge["name"]}", style=filled, fillcolor="lightblue"];\n'
+                )
+
+                for formal, actuals in hyperedge["args"].items():
+                    for actual in actuals:
+                        f.write(f'\tnode{actual} -> node{hyperedge_node_idx} [label="{formal}"];\n')
             f.write("}\n")  # graph
 
 
@@ -127,6 +188,26 @@ def _as_np_array(arr):
     return np.array(arr, dtype=np.int32)
 
 
+def extract_hyperedge_info(data, type_name_exclude_set=frozenset()):
+    assert "edges" not in data["graph"] or len(data["graph"]["edges"]) == 0, "Fella, are you passing a hypegraph"
+    assert all(len(he["name"]) > 0 for he in data["graph"]["hyperedges"])
+
+    def iter_hyperedges():
+        for h_edge in data["graph"]["hyperedges"]:
+            if h_edge["name"] in type_name_exclude_set:
+                continue
+            args = itertools.chain.from_iterable(((name, val) for val in vals) for name, vals in h_edge["args"].items())
+            argnames, argidxs = zip(*args)
+            yield HyperedgeData(
+                hyperedge_type=h_edge["name"],
+                args=list(argnames),
+                node_idxs=list(argidxs),
+                metadata=h_edge["docstring"],
+            )
+
+    return list(iter_hyperedges())
+
+
 class BugLabData(TypedDict):
     graph: BugLabGraph
     candidate_rewrites: List[Tuple[str, Any]]
@@ -137,7 +218,7 @@ class BugLabData(TypedDict):
     candidate_rewrite_logprobs: Optional[List[float]]
 
     @classmethod
-    def as_graph_data(cls, data: "BugLabData") -> Tuple[GraphData, Optional[int]]:
+    def _compute_candidates_target_idxs(cls, data):
         candidate_node_idxs, inv = np.unique(data["graph"]["reference_nodes"], return_inverse=True)
         if data["target_fix_action_idx"] is not None:
             target_node_idx = inv[data["target_fix_action_idx"]]
@@ -146,6 +227,11 @@ class BugLabData(TypedDict):
             )
         else:
             target_node_idx = None
+        return candidate_node_idxs, target_node_idx
+
+    @classmethod
+    def as_graph_data(cls, data: "BugLabData") -> Tuple[GraphData, Optional[int]]:
+        candidate_node_idxs, target_node_idx = cls._compute_candidates_target_idxs(data)
 
         add_open_vocab_nodes_and_edges(data["graph"])
         return (
@@ -166,6 +252,30 @@ class BugLabData(TypedDict):
             target_node_idx,
         )
 
+    @classmethod
+    def as_hypergraph_data(
+        cls,
+        data: "BugLabData",
+        type_name_exclude_set: Set[str] = frozenset(),
+    ) -> Tuple[HypergraphData, Optional[int]]:
+        assert "edges" not in data["graph"] or len(data["graph"]["edges"]) == 0, "Fella, are you passing a hypegraph"
+        candidate_node_idxs, target_node_idx = cls._compute_candidates_target_idxs(data)
+
+        for he in data["graph"]["hyperedges"]:
+            assert len(he["name"]) > 0
+
+        hyperedges = extract_hyperedge_info(data, type_name_exclude_set=type_name_exclude_set)
+        return (
+            HypergraphData(
+                node_information=data["graph"]["nodes"],
+                hyperedges=hyperedges,
+                reference_nodes={
+                    "candidate_nodes": candidate_node_idxs,
+                },
+            ),
+            target_node_idx,
+        )
+
 
 class TypeAnnotationPrediction(NamedTuple):
     score: float
@@ -179,17 +289,27 @@ class TypeAnnotationData(TypedDict):
 
     @classmethod
     def as_graph_data(cls, data: "TypeAnnotationData") -> GraphData:
-        candidate_node_idxs, inv = np.unique(data["graph"]["reference_nodes"], return_inverse=True)
-
         add_open_vocab_nodes_and_edges(data["graph"])
-
         return GraphData(
             node_information=data["graph"]["nodes"],
             edges={
                 e_type: _as_np_array([(e[0], e[1]) for e in adj_list])
                 for e_type, adj_list in data["graph"]["edges"].items()
             },
-            reference_nodes={"candidate_nodes": candidate_node_idxs},
+            reference_nodes={"annotated_nodes": data["graph"]["reference_nodes"]},
+        )
+
+    @classmethod
+    def as_hypergraph_data(
+        cls,
+        data: "TypeAnnotationData",
+        type_name_exclude_set: Set[str] = frozenset(),
+    ) -> HypergraphData:
+        hyperedges = extract_hyperedge_info(data)
+        return HypergraphData(
+            node_information=data["graph"]["nodes"],
+            hyperedges=hyperedges,
+            reference_nodes={"annotated_nodes": data["graph"]["reference_nodes"]},
         )
 
 

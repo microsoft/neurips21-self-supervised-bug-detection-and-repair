@@ -1,9 +1,7 @@
 import logging
+import numpy as np
 import os
 from contextlib import ExitStack, contextmanager
-from queue import Queue
-
-import numpy as np
 from opentelemetry import trace
 from opentelemetry.exporter.jaeger import JaegerSpanExporter as SpanExporter
 from opentelemetry.sdk.trace import TracerProvider
@@ -18,6 +16,7 @@ from prometheus_client import (
     push_to_gateway,
     start_http_server,
 )
+from queue import Queue
 
 
 def configure_logging():

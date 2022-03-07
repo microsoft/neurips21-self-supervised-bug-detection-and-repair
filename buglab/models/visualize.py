@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Usage:
-    visualize.py [options] MODEL_FILENAME DATA_PATH OUT_HTML
+    predict.py [options] MODEL_FILENAME DATA_PATH OUT_HTML
 
 Options:
     --aml                      Run this in Azure ML
@@ -22,16 +22,15 @@ Options:
 import html
 import io
 import math
-import os
-from collections import defaultdict
-from pathlib import Path
-
 import numpy as np
+import os
 import pystache
 import torch
+from collections import defaultdict
 from docopt import docopt
 from dpu_utils.utils import RichPath, run_and_debug
 from libcst.metadata import CodeRange
+from pathlib import Path
 
 from buglab.models.gnn import GnnBugLabModel
 from buglab.utils.iteratorutils import sampled_iterator

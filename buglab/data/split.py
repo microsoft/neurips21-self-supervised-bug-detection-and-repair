@@ -7,16 +7,16 @@ Usage:
 
 Options:
     -h --help                    Show this screen.
-    --train-ratio FLOAT          Ratio of files for training set. [default: 0.6]
-    --valid-ratio FLOAT          Ratio of files for validation set. [default: 0.2]
+    --train-ratio FLOAT          Ratio of files for training set. [default: 0.7]
+    --valid-ratio FLOAT          Ratio of files for validation set. [default: 0.1]
     --test-only-libraries=<File> A file containing the project names of the test-only data.
 """
-import hashlib
-from multiprocessing import Pool
-from pathlib import Path
 from typing import Dict, Set
 
+import hashlib
 from docopt import docopt
+from multiprocessing import Pool
+from pathlib import Path
 
 # Code adapted from https://github.com/microsoft/graph-based-code-modelling/blob/8967fac899628d74bf550d1ee2655c4cc85fa082/Models/utils/dataset_split.py
 from buglab.utils.msgpackutils import load_msgpack_l_gz, save_msgpack_l_gz
@@ -50,9 +50,9 @@ def split_file(
             if datapoint is None:
                 continue
             datapoint_provenance: str = datapoint["graph"]["path"]
-            idx = datapoint_provenance.index("/venv/lib/python3.8/site-packages")
+            idx = datapoint_provenance.index("/venv/lib/python3.6/site-packages")
             assert idx >= 0
-            datapoint_provenance = datapoint_provenance[idx + len("/venv/lib/python3.8/site-packages") :]
+            datapoint_provenance = datapoint_provenance[idx + len("/venv/lib/python3.6/site-packages") :]
             library = datapoint["package_name"]
             file_set = get_fold(datapoint_provenance, library, train_ratio, valid_ratio, test_only_libraries)
             if file_set == "train":

@@ -1,11 +1,11 @@
-import argparse
 from typing import Dict, Optional
 
+import argparse
 import msgpack
 import zmq
 from tqdm import tqdm
 
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 
 if __name__ == "__main__":
     configure_logging()

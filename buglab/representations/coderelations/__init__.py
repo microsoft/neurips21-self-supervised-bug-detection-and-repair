@@ -1,7 +1,7 @@
-import logging
-import time
 from typing import Optional
 
+import logging
+import time
 from jedi.api.environment import Environment
 
 from ..codereprs import PythonCodeRelations
@@ -9,6 +9,7 @@ from .ast import AstRelations
 from .callandtypeinfo import CallAndTypeInfo
 from .controlflow import ControlFlow
 from .dataflow import DataFlow
+from .syntactic_hyperedges import SyntacticHyperedgeRelations
 from .tokens import TokenRelations
 
 PHASES = {
@@ -17,6 +18,7 @@ PHASES = {
     "controlflow": ControlFlow.compute_controlflow_relations,
     "dataflow": DataFlow.compute_dataflow_relations,
     "call-and-type": CallAndTypeInfo.compute_call_and_type_info,
+    "hyperedges": SyntacticHyperedgeRelations.add_relations,
 }
 
 LOGGER = logging.getLogger(__name__)

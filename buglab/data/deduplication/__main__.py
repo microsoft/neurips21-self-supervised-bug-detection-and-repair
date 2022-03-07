@@ -4,7 +4,7 @@ import logging
 import pickle
 from pathlib import Path
 
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 
 from .index import DuplicationIndex
 

@@ -1,10 +1,11 @@
-from collections import defaultdict
-from pathlib import Path
-from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, DefaultDict, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple, Union
+from typing_extensions import Final
 
 import libcst as cst
+from collections import defaultdict
+from copy import deepcopy
 from libcst.metadata import CodeRange
-from typing_extensions import Final
+from pathlib import Path
 
 from buglab.representations.data import BugLabGraph
 from buglab.utils.cstutils import PersistentMetadataWrapper, PositionFilter, subsumes_code_range
@@ -22,6 +23,13 @@ class DummyEntity:
 TNode = Union[cst.CSTNode, DummyEntity]
 
 
+class HyperEdge(NamedTuple):
+    fn_name: str
+    fn_docstring: Optional[str]
+    # Formal to Actual. var-args are a set.
+    arguments: Dict[str, Union[cst.CSTNode, Set[cst.CSTNode]]]
+
+
 class PythonCodeRelations:
     def __init__(self, code_text: str, path: Path):
         self.__code_text = code_text
@@ -29,9 +37,11 @@ class PythonCodeRelations:
 
         self.__ast_with_metadata_wrapper = PersistentMetadataWrapper(cst.parse_module(code_text), unsafe_skip_copy=True)
 
-        self.__relations: DefaultDict[str, DefaultDict[TNode, Set[Tuple[TNode, Any]]]] = defaultdict(
+        self.__pairwise_relations: DefaultDict[str, DefaultDict[TNode, Set[Tuple[TNode, Any]]]] = defaultdict(
             lambda: defaultdict(set)
         )
+
+        self.__relations: List[HyperEdge] = []
 
     @property
     def ast(self) -> cst.Module:
@@ -53,9 +63,32 @@ class PythonCodeRelations:
         self, relation_kind: str, from_node: TNode, to_node: Optional[TNode] = None, metadata: Any = None
     ) -> None:
         assert from_node is not None
-        node_relations = self.__relations[relation_kind][from_node]
+        node_relations = self.__pairwise_relations[relation_kind][from_node]
         assert to_node is not None or metadata is not None
         node_relations.add((to_node, metadata))
+
+    def add_hyperedge_relation(
+        self,
+        fn_name,
+        fn_docstring: Optional[str],
+        return_value: Optional[cst.CSTNode],
+        arguments: Dict[str, Union[cst.CSTNode, Set[cst.CSTNode]]],
+    ):
+        if fn_docstring is not None and len(fn_docstring.strip()) == 0:
+            fn_docstring = None
+
+        hyperedge_arguments = defaultdict(set)
+        for formal, actuals in arguments.items():
+            if not isinstance(actuals, Iterable):
+                hyperedge_arguments[formal].add(actuals)
+                continue
+            for actual in actuals:
+                hyperedge_arguments[formal].add(actual)
+
+        if return_value is not None:
+            hyperedge_arguments["$rval"] = {return_value}
+
+        self.__relations.append(HyperEdge(fn_name, fn_docstring, hyperedge_arguments))
 
     def __map_nodes_to_idx(self, target_range: Optional[CodeRange]) -> Dict[Any, int]:
         """Map all nodes within the target range to a unique id."""
@@ -70,7 +103,7 @@ class PythonCodeRelations:
             if node not in node_to_idx:
                 node_to_idx[node] = len(node_to_idx)
 
-        for node_rels in self.__relations.values():
+        for node_rels in self.__pairwise_relations.values():
             for from_node, target_nodes in node_rels.items():
                 if nodes_to_use is not None and isinstance(from_node, cst.CSTNode) and from_node not in nodes_to_use:
                     continue
@@ -135,7 +168,7 @@ class PythonCodeRelations:
                 all_nodes[idx] = self.get_abbrv_symbol_name(node)
 
         edges = {}
-        for rel_type, nodes in self.__relations.items():
+        for rel_type, nodes in self.__pairwise_relations.items():
             edges_for_rel = []
             edges[rel_type] = edges_for_rel
             for from_node, to_nodes in nodes.items():
@@ -152,9 +185,37 @@ class PythonCodeRelations:
                     else:
                         edges_for_rel.append((from_idx, to_idx, metadata))
 
+        def to_ids(nodes: Union[cst.CSTNode, Set[cst.CSTNode]]):
+            if isinstance(nodes, cst.CSTNode):
+                nodes = {nodes}
+            return [node_idxs[n] for n in nodes]
+
+        def hyperedge_in_range(he: HyperEdge):
+            for he_elements in he.arguments.values():
+                if isinstance(he_elements, cst.CSTNode):
+                    if he_elements not in node_idxs:
+                        return False
+                else:
+                    if not all(e in node_idxs for e in he_elements):
+                        return False
+            return True
+
+        hyperedges: List[BuglabHyperedge] = []
+        for hyperedge in self.__relations:
+            if not hyperedge_in_range(hyperedge):
+                continue
+            hyperedges.append(
+                {
+                    "name": hyperedge.fn_name,
+                    "docstring": hyperedge.fn_docstring,
+                    "args": {k: to_ids(v) for k, v in hyperedge.arguments.items()},
+                }
+            )
+
         data = {
             "nodes": all_nodes,
             "edges": edges,
+            "hyperedges": hyperedges,
             "path": str(self.__path),
             "reference_nodes": [node_idxs.get(n) for n in reference_nodes],
             "text": get_text_in_range(self.__code_text, target_range),
@@ -173,7 +234,10 @@ class PythonCodeRelations:
         return node
 
     def as_dot(
-        self, filepath: Path, edge_colors: Optional[Dict[str, str]] = None, target_range: Optional[CodeRange] = None
+        self,
+        filepath: Path,
+        edge_colors: Optional[Dict[str, str]] = None,
+        target_range: Optional[CodeRange] = None,
     ):
         node_idxs = self.__map_nodes_to_idx(target_range)
 
@@ -184,7 +248,7 @@ class PythonCodeRelations:
             edge_colors = {}
 
         token_nodes = set()
-        for from_node, to_nodes in self.__relations["NextToken"].items():
+        for from_node, to_nodes in self.__pairwise_relations["NextToken"].items():
             token_nodes.update(t for t, m in to_nodes)
             token_nodes.add(from_node)
 
@@ -197,7 +261,7 @@ class PythonCodeRelations:
                     node_lbl = escape(self.__node_to_label(node))
                     f.write(f'\t node{node_idx}[shape="rectangle", label="{node_lbl}"];\n')
                 else:
-                    node_lbl = escape(node)
+                    node_lbl = escape(self.get_abbrv_symbol_name(node))
                     f.write(
                         f'\t node{node_idx}[shape="rectangle", label="{node_lbl}", style=filled, fillcolor="orange"];\n'
                     )
@@ -208,14 +272,38 @@ class PythonCodeRelations:
                 node_lbl = escape(self.__node_to_label(token_node))
                 f.write(f'\t\tnode{node_idxs[token_node]}[shape="rectangle", label="{node_lbl}"];\n')
             edge_color = edge_colors.get("NextToken", "black")
-            self.__create_dot_edges(edge_color, f, node_idxs, self.__relations["NextToken"], "NextToken")
+            self.__create_dot_edges(edge_color, f, node_idxs, self.__pairwise_relations["NextToken"], "NextToken")
             f.write("\t}\n")  # subgraph
 
-            for rel_type, nodes in self.__relations.items():
+            for rel_type, nodes in self.__pairwise_relations.items():
                 if rel_type == "NextToken":
                     continue
                 edge_color = edge_colors.get(rel_type, "black")
                 self.__create_dot_edges(edge_color, f, node_idxs, nodes, rel_type)
+
+            # Hyperedges
+            next_node_idx = len(node_idxs)
+            for hyperedge in self.__relations:
+                # In-range filtering
+                in_range = True
+                for formal, actuals in hyperedge.arguments.items():
+                    if not isinstance(actuals, set):
+                        actuals = {actuals}
+                    in_range = in_range and all(a in node_idxs for a in actuals)
+                if not in_range:
+                    continue
+
+                hyperedge_node_idx = next_node_idx
+                next_node_idx += 1
+                f.write(
+                    f'\tnode{hyperedge_node_idx}[shape="rectangle", label="{hyperedge.fn_name}", style=filled, fillcolor="lightblue"];\n'
+                )
+                for formal, actuals in hyperedge.arguments.items():
+                    if not isinstance(actuals, set):
+                        actuals = {actuals}
+                    for actual in actuals:
+                        f.write(f'\tnode{node_idxs[actual]} -> node{hyperedge_node_idx} [label="{formal}"];\n')
+
             f.write("}\n")  # graph
 
     def __create_dot_edges(self, edge_color, f, node_idxs, nodes, rel_type, indent="\t", weight=None):

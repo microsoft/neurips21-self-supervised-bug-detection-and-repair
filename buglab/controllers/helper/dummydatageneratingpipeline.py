@@ -1,18 +1,17 @@
 import argparse
 import logging
-import time
-from threading import Thread
-
 import msgpack
+import time
 import zmq
 from dpu_utils.utils import RichPath
 from libcst.metadata import CodeRange
+from threading import Thread
 from tqdm import tqdm
 
 from buglab.controllers.datageneratingpipeline_coordinator import data_pipeline_proxy
 from buglab.representations.data import BugLabData
 from buglab.utils.cstutils import relative_range
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 from buglab.utils.msgpackutils import load_all_msgpack_l_gz
 from buglab.utils.text import get_text_in_range
 

@@ -1,18 +1,18 @@
-import argparse
-import json
-import math
-import os
-import subprocess
-import traceback
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any, List, Optional, Tuple, Type
 
+import argparse
 import jedi
+import json
 import libcst as cst
+import math
 import numpy as np
+import os
+import subprocess
 import torch
+import traceback
 from dpu_utils.utils import run_and_debug
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from tqdm import tqdm
 
 from buglab.controllers.buggydatacreation import get_serialized_representation
@@ -22,7 +22,7 @@ from buglab.representations.codereprs import PythonCodeRelations
 from buglab.rewriting import ALL_REWRITE_SCOUTS, AbstractRewriteOp, ICodeRewriteScout, filter_ops_in_range
 from buglab.utils import detect_encoding_and_open
 from buglab.utils.cstutils import AllFunctionFinder
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 
 
 def exec_command(venv_location: Optional[Path], command: str):

@@ -1,17 +1,16 @@
-import argparse
-import os
 from typing import Any, List, Optional, Tuple, Type
 
+import argparse
 import graphviz as gv
 import jedi
 import libcst as cst
+import os
 import streamlit as st
 
 st.set_page_config(layout="wide")
+import torch
 from glob import glob
 from pathlib import Path
-
-import torch
 
 from buglab.controllers.buggydatacreation import get_serialized_representation
 from buglab.models.gnn import GnnBugLabModel
@@ -84,7 +83,6 @@ model_path = st.selectbox("Model", options=glob(os.path.join(args.models_dir, "*
 device, model, nn = load_model(model_path)
 
 
-@st.cache
 def predict(code_text):
     predictions = model.predict(get_data_iterator_from(code_text), nn, device, parallelize=False)
     return list(predictions)

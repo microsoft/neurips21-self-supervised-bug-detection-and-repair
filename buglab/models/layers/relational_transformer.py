@@ -121,5 +121,5 @@ class RelationalTransformerEncoderLayer(nn.Module):
         src2 = self._alpha2 * src2
         src = src + self.dropout2(src2)
         if self._normalisation_mode == "postnorm":
-            src = self.norm1(src)
+            src = self.norm2(src)
         return src

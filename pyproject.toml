@@ -11,6 +11,7 @@ local_scheme="no-local-version"
 line_length = 120
 multi_line_output = 3
 include_trailing_comma = true
+known_standard_library ="typing,typing_extensions"
 known_first_party="buglab"
 known_third_party="numpy,torch,azureml,jedi,dpu_utils,docopt,jellyfish,torch_scatter,tqdm,libcst,zmq,msgpack"
 

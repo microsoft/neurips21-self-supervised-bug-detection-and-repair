@@ -1,14 +1,13 @@
 import argparse
 import logging
 import random
+import zmq
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from threading import Thread
 
-import zmq
-
 from buglab.data.deduplication import DuplicationIndex
-from buglab.utils.logging import MetricProvider, configure_logging
+from buglab.utils.loggingutils import MetricProvider, configure_logging
 
 LOGGER = logging.getLogger(__name__)
 metric_provider = MetricProvider("DataGeneratingPipelineCoordinator")
@@ -38,6 +37,12 @@ if __name__ == "__main__":
         "package_list_path",
         type=str,
         help="the path to a txt file containing the names of the packages to be considered",
+    )
+    parser.add_argument(
+        "--bug-selector-server-address",
+        type=str,
+        default="tcp://localhost:5556",
+        help="The zmq address to the bug selector server.",
     )
 
     parser.add_argument(

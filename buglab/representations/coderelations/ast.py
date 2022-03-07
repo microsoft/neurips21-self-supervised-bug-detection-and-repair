@@ -1,7 +1,7 @@
+import libcst as cst
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import fields
-
-import libcst as cst
 
 from buglab.representations.codereprs import PythonCodeRelations
 from buglab.utils.cstutils import is_whitespace_node
@@ -32,14 +32,21 @@ class AstRelations(cst.CSTVisitor):
             return False
         prev_child = None
 
+        hyperedge_children = defaultdict(set)
         for child, child_name in self.__named_children(node):
             if is_whitespace_node(child):
                 continue
             self.__code_relations.add_relation("Child", node, child, child_name)
+            hyperedge_children[child_name].add(child)
 
             if prev_child is not None:
                 self.__code_relations.add_relation("Sibling", prev_child, child)
             prev_child = child
+
+        if len(hyperedge_children) > 0:
+            self.__code_relations.add_hyperedge_relation(
+                fn_name="$AstChild", fn_docstring=None, return_value=node, arguments=hyperedge_children
+            )
 
         return True
 

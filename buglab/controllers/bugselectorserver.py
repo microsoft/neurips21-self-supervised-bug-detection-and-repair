@@ -1,19 +1,19 @@
+from typing import Dict, List
+
 import argparse
 import json
 import logging
-from collections import Counter, defaultdict
-from threading import Event, Thread
-from typing import Dict, List
-
 import msgpack
 import numpy as np
 import torch
 import zmq
+from collections import Counter, defaultdict
 from dpu_utils.utils import run_and_debug
+from threading import Event, Thread
 
 from buglab.controllers.helper.randombugselectorserver import random_bug_selector_server, select_random_rewrites
 from buglab.data.modelsync import MockModelSyncClient, ModelSyncClient
-from buglab.utils.logging import MetricProvider, configure_logging
+from buglab.utils.loggingutils import MetricProvider, configure_logging
 
 LOGGER = logging.getLogger(__name__)
 metric_provider = MetricProvider("BugSelectorServer")

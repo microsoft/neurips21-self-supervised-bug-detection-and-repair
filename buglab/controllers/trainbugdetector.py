@@ -1,23 +1,22 @@
 import argparse
 import logging
-import time
-from pathlib import Path
-from queue import Queue
-from threading import Thread
-
 import msgpack
+import time
 import yaml
 import zmq
 from dpu_utils.utils import RichPath, run_and_debug
+from pathlib import Path
 from ptgnn.baseneuralmodel import ModelTrainer
 from ptgnn.baseneuralmodel.utils.data import LazyDataIterable
+from queue import Queue
+from threading import Thread
 
 from buglab.data.modelsync import ModelSyncServer
 from buglab.models.modelregistry import load_model
 from buglab.models.train import construct_data_loading_callable
 from buglab.models.utils import LinearWarmupScheduler, optimizer
 from buglab.utils.iteratorutils import limited_queue_iterator
-from buglab.utils.logging import MetricProvider, configure_logging
+from buglab.utils.loggingutils import MetricProvider, configure_logging
 from buglab.utils.msgpackutils import load_all_msgpack_l_gz
 
 LOGGER = logging.getLogger(__name__)
@@ -46,9 +45,9 @@ def run(arguments):
 
     # Kick-off training of the model and validate at regular intervals
     training_data_queue = metric_provider.new_queue(
-        "training_queue_from_buffer", maxsize=10000, description="The number of elements loaded from the data buffer."
+        "training_queue_from_buffer", maxsize=1000, description="The number of elements loaded from the data buffer."
     )
-    training_data = LazyDataIterable(lambda: limited_queue_iterator(training_data_queue, 200_000))
+    training_data = LazyDataIterable(lambda: limited_queue_iterator(training_data_queue, 400_000))
 
     data_buffer_to_training_thread = Thread(
         target=lambda: training_queue_filler(training_data_queue, arguments.training_data_buffer_address),
@@ -79,6 +78,7 @@ def run(arguments):
         clip_gradient_norm=run_spec["training"].get("gradientClipNorm", None),
         scheduler_creator=lambda o: LinearWarmupScheduler(o),
         enable_amp=arguments.amp,
+        catch_cuda_ooms=True,
     )
     if nn is not None:
         trainer.neural_module = nn
@@ -97,15 +97,8 @@ def run(arguments):
         target_path = model_path.parent / f"detector-ckpt-{int(time.time())}.pkl.gz"
         model.save(target_path, nn)
 
-    trainer.register_validation_epoch_end_hook(checkpoint_model)
-
     train_loss_metric = metric_provider.new_measure("training_loss")
     trainer.register_train_epoch_end_hook(lambda _, __, ___, metrics: train_loss_metric.record(metrics["Loss"]))
-
-    validation_loss_metric = metric_provider.new_measure("validation_loss")
-    trainer.register_validation_epoch_end_hook(
-        lambda _, __, ___, metrics: validation_loss_metric.record(metrics["Loss"])
-    )
 
     def publish_created_model(model, nn, optimizer):
         nonlocal model_sync_server
@@ -138,7 +131,8 @@ def run(arguments):
             dummy_validation_metric = 32.0
             target_metric_improved = True
             publish_updated_model(None, trainer.neural_module, None, None)
-            return dummy_validation_metric, target_metric_improved
+            checkpoint_model(trainer.model, trainer.neural_module, None, None)
+            return dummy_validation_metric, target_metric_improved, {}
 
         trainer._run_validation = _run_validation
 
@@ -148,6 +142,7 @@ def run(arguments):
         initialize_metadata=False,
         parallelize=not arguments.sequential,
         use_multiprocessing=False,
+        shuffle_training_data=False,  # Replay buffer takes care of this
         patience=run_spec["training"].get("patience", 10),
         show_progress_bar=False,
     )

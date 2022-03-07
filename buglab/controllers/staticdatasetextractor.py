@@ -1,3 +1,5 @@
+from typing import List
+
 import argparse
 import logging
 import os
@@ -8,11 +10,10 @@ from os import PathLike
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from threading import Thread
-from typing import List
 
 from buglab.controllers.helper.randombugselectorserver import random_bug_selector_server
 from buglab.data.deduplication import DuplicationIndex
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 
 LOGGER = logging.getLogger(__name__)
 

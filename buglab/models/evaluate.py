@@ -16,15 +16,15 @@ Options:
     -h --help                  Show this screen.
     --debug                    Enable debug routines. [default: False]
 """
-import math
-from collections import defaultdict
-from pathlib import Path
 from typing import List, Tuple
 
+import math
 import numpy as np
 import torch
+from collections import defaultdict
 from docopt import docopt
 from dpu_utils.utils import RichPath, run_and_debug
+from pathlib import Path
 
 from buglab.models.gnn import GnnBugLabModel
 from buglab.utils.msgpackutils import load_all_msgpack_l_gz
@@ -55,7 +55,7 @@ def run(arguments):
 
     bug_detection_logprobs: List[
         Tuple[float, bool, bool, bool, bool]
-    ] = []  # prediction_prob, has_bug, predicted_no_bug, location_correct, rewrite_given_location_is_correct
+    ] = []  # prediction_logprob, has_bug, predicted_buggy, location_correct, rewrite_given_location_is_correct
 
     for datapoint, location_logprobs, rewrite_probs in predictions:
         if arguments.get("--assume-buggy", False):
@@ -67,6 +67,8 @@ def run(arguments):
         sample_has_bug = target_fix_action_idx is not None
 
         if sample_has_bug and arguments.get("--eval-only-no-bug", False):
+            continue
+        elif arguments.get("--assume-buggy", False) and not sample_has_bug:
             continue
         num_samples += 1
 
@@ -253,6 +255,33 @@ def run(arguments):
     print("### Recall (Detect and Repair) ###")
     recall = np.interp(threshold_x, thresholds[::-1], recall[::-1], right=0)
     print("recall = np." + repr(recall))
+
+    print("### Expected Calibration Error")
+    probs = [np.exp(pred[0]) for pred in bug_detection_logprobs]
+    correct = [
+        (not has_bug and not predicted_buggy)
+        or (has_bug and predicted_buggy and location_correct and rewrite_given_location_is_correct)
+        for _, has_bug, predicted_buggy, location_correct, rewrite_given_location_is_correct in bug_detection_logprobs
+    ]
+
+    num_buckets = 50
+    bucket_acc_sum = [0 for _ in range(num_buckets)]
+    bucket_count = [0 for _ in range(num_buckets)]
+
+    for pr, is_correct in zip(probs, correct):
+        bucket_idx = int(pr * num_buckets)
+        if bucket_idx == num_buckets:
+            bucket_idx = num_buckets - 1
+        if is_correct:
+            bucket_acc_sum[bucket_idx] += 1
+        bucket_count[bucket_idx] += 1
+
+    bucket_count = np.array(bucket_count)
+    bucket_acc = np.array(bucket_acc_sum) / bucket_count
+    expected_acc = np.linspace(0, 1, endpoint=False, num=num_buckets) + 1 / num_buckets / 2
+    print("bucket_acc=np." + repr(bucket_acc))
+    print("expected_acc=np." + repr(expected_acc))
+    print("ece=", np.nansum(np.abs(bucket_acc - expected_acc) * bucket_count) / bucket_count.sum())
 
 
 if __name__ == "__main__":

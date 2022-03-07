@@ -7,15 +7,19 @@ Usage:
 
 Options:
     -t --type [WRONG_OPERATOR|VARMISUSE]   Bug type to filter to. [default: WRONG_OPERATOR]
+    -n --number NUMBER                     Number of example to output; -1 indicating all. [default: -1]
+    -c --chunk-size NUMBER                 Number of examples per output file. [default: 512]
     -h --help                              Show this screen.
 """
-from copy import deepcopy
-from itertools import compress
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
+from copy import deepcopy
 from docopt import docopt
 from dpu_utils.utils import run_and_debug
+from itertools import compress
+from more_itertools import chunked
+from pathlib import Path
 
 from buglab.data.filter_data_to_cubert import (
     BugType,
@@ -55,15 +59,16 @@ def filter_datapoint_rewrites(
     result["candidate_rewrite_ranges"] = list(compress(datapoint["candidate_rewrite_ranges"], rewrite_mask))
     result["candidate_rewrite_metadata"] = list(compress(datapoint["candidate_rewrite_metadata"], rewrite_mask))
 
+    if len(result["candidate_rewrites"]) == 0:
+        return None
+
     return result
 
 
-def filter_file(
-    input_path: Path,
-    output_folder: Path,
-    bug_type: BugType,
-) -> None:
-    output_path = output_folder.joinpath(input_path.name)
+def run(args):
+    bug_type = BugType[args["--type"]]
+    out_folder = Path(args["OUTPUT_FOLDER"])
+    out_folder.mkdir(parents=True, exist_ok=True)
 
     if bug_type is BugType.WRONG_OPERATOR:
         rewrite_filter_fn = rewrite_is_cubert_wrong_operator_bug
@@ -74,24 +79,29 @@ def filter_file(
 
     filtered_datapoints = []
     num_read = 0
-    for datapoint in load_msgpack_l_gz(input_path):
-        if datapoint is None:
-            continue
-        num_read += 1
-        filtered_datapoint = filter_datapoint_rewrites(datapoint, rewrite_filter_fn)
-        if filtered_datapoint is not None:
-            filtered_datapoints.append(filtered_datapoint)
-    save_msgpack_l_gz(filtered_datapoints, output_path)
-    print(f"Read {num_read} examples, filtered down to {len(filtered_datapoints)}.")
-    print(f"Results stored in {output_path}.")
-
-
-def run(args):
-    bug_type = BugType[args["--type"]]
-    out_folder = Path(args["OUTPUT_FOLDER"])
-    out_folder.mkdir(parents=True, exist_ok=True)
     for pkg_file in Path(args["INPUT_DATA_FOLDER"]).rglob("*.msgpack.l.gz"):
-        filter_file(pkg_file, out_folder, bug_type)
+        for datapoint in load_msgpack_l_gz(pkg_file):
+            if datapoint is None:
+                continue
+            num_read += 1
+            filtered_datapoint = filter_datapoint_rewrites(datapoint, rewrite_filter_fn)
+            if filtered_datapoint is not None:
+                filtered_datapoints.append(filtered_datapoint)
+    print(f"Read {num_read} examples, filtered down to {len(filtered_datapoints)}.")
+
+    np.random.shuffle(filtered_datapoints)
+    max_num = int(args["--number"])
+    if max_num >= 0:
+        if max_num > len(filtered_datapoints):
+            raise ValueError(
+                f"Cannot take {max_num} datapoints from {len(filtered_datapoints)} samples after filtering"
+            )
+        filtered_datapoints = filtered_datapoints[:max_num]
+
+    for i, data_chunk in enumerate(chunked(filtered_datapoints, int(args["--chunk-size"]))):
+        output_path = out_folder.joinpath(f"chunk_{i:02d}.msgpack.l.gz")
+        save_msgpack_l_gz(data_chunk, output_path)
+        print(f"Stored {len(data_chunk)} examples in {output_path}.")
 
 
 if __name__ == "__main__":

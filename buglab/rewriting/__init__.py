@@ -23,7 +23,10 @@ from buglab.rewriting.semanticspreserving import (
     CommentDelete,
     IfElseSwap,
     MirrorComparisons,
+    RemoveTypeAnnotations,
     RenameVariableInLocalScope,
+    ShuffleLiteralConstructors,
+    ShuffleNamedArgs,
 )
 from buglab.utils.cstutils import subsumes_code_range
 
@@ -37,7 +40,15 @@ ALL_REWRITE_SCOUTS: Final = (
     VariableMisuseRewriteScout,
 )
 
-ALL_SEMANTICS_PRESERVING_TRANSFORMS: Final = (MirrorComparisons, RenameVariableInLocalScope, CommentDelete, IfElseSwap)
+ALL_SEMANTICS_PRESERVING_TRANSFORMS: Final = (
+    MirrorComparisons,
+    RenameVariableInLocalScope,
+    CommentDelete,
+    IfElseSwap,
+    ShuffleNamedArgs,
+    RemoveTypeAnnotations,
+    ShuffleLiteralConstructors,
+)
 
 
 def filter_ops_in_range(

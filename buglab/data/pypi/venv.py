@@ -1,9 +1,10 @@
+from typing import Iterator, NamedTuple, Set
+
 import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Iterator, NamedTuple, Set
 
 
 class PackageLabInfo(NamedTuple):
@@ -76,4 +77,5 @@ def create_venv_and_install(package: str) -> Iterator[PackageLabInfo]:
                     in_files_section = True
                 elif in_files_section:
                     all_files.add(line.strip())
+
         yield PackageLabInfo(venv_location, pkg_location, package, pkg_version, all_files)

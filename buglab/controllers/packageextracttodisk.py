@@ -1,16 +1,15 @@
 import argparse
+import libcst as cst
 import logging
 import os
 import sys
-from pathlib import Path
-
-import libcst as cst
 from dpu_utils.utils import run_and_debug
+from pathlib import Path
 
 from buglab.controllers.buggydatacreation import extract_for_package
 from buglab.data.deduplication import DuplicationClient
 from buglab.rewriting import AssignRewriteScout, BinaryOperatorRewriteScout
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 from buglab.utils.msgpackutils import save_msgpack_l_gz
 
 LOGGER = logging.getLogger(__name__)

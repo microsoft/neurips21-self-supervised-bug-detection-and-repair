@@ -1,9 +1,9 @@
-from collections import defaultdict
-from random import Random
-from typing import Dict, Final, Optional, Set, Union
+from typing import Dict, Final, Optional, Sequence, Set, Union
 
 import libcst as cst
+from collections import defaultdict
 from libcst.metadata import QualifiedName, QualifiedNameProvider, QualifiedNameSource, Scope, ScopeProvider
+from random import Random
 
 
 class MirrorComparisons(cst.CSTTransformer):
@@ -223,7 +223,7 @@ class CommentDelete(cst.CSTTransformer):
         return module.visit(CommentDelete(p_apply)).code
 
 
-class NegateExpression(cst.CSTTransformer):
+class _NegateExpression(cst.CSTTransformer):
     def leave_BooleanOperation(
         self, original_node: cst.BooleanOperation, updated_node: cst.BooleanOperation
     ) -> cst.BooleanOperation:
@@ -316,7 +316,7 @@ class IfElseSwap(cst.CSTTransformer):
         if self._rng.random() > self._p_swap:
             return updated_node
 
-        negation_visitor = NegateExpression()
+        negation_visitor = _NegateExpression()
         negated = updated_node.test.visit(negation_visitor)
 
         return cst.If(
@@ -336,7 +336,7 @@ class IfElseSwap(cst.CSTTransformer):
         if self._rng.random() > self._p_swap:
             return updated_node
 
-        negation_visitor = NegateExpression()
+        negation_visitor = _NegateExpression()
         negated = updated_node.test.visit(negation_visitor)
 
         return updated_node.with_changes(test=negated, body=updated_node.orelse, orelse=updated_node.body)
@@ -348,6 +348,131 @@ class IfElseSwap(cst.CSTTransformer):
         return wrapper.visit(IfElseSwap(p_apply)).code
 
 
+class ShuffleNamedArgs(cst.CSTTransformer):
+    """
+    Shuffle named arguments of calls.
+
+    For example:
+        foo(a=1, b=2) is transformed to foo(b=2, a=1)
+
+    Note that this not entirely semantics preserving. If `foo(a=bar1(), b=bar2())` and
+    the order of executing `bar1`, `bar2` matters then the semantics will not be preserved.
+
+    """
+
+    def __init__(self, p_shuffle: float = 1, rng: Optional[Random] = None):
+        super().__init__()
+        if rng is None:
+            self._rng = Random()
+        else:
+            self._rng = rng
+
+        assert 0 <= p_shuffle <= 1, "Not a valid probability."
+        self._p_shuffle = p_shuffle
+
+    def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.Call:
+        if self._rng.random() > self._p_shuffle:
+            return updated_node
+
+        def shuffle_named_args():
+            to_be_shuffled = []
+            for arg in updated_node.args:
+                if arg.keyword is None:
+                    yield arg
+                else:
+                    to_be_shuffled.append(arg)
+            if len(to_be_shuffled) > 1:
+                self._rng.shuffle(to_be_shuffled)
+            yield from to_be_shuffled
+
+        return updated_node.with_changes(args=list(shuffle_named_args()))
+
+    @classmethod
+    def apply(cls, code: str, p_apply: float = 1.0) -> str:
+        module: cst.Module = cst.parse_module(code)
+        wrapper = cst.MetadataWrapper(module)
+        return wrapper.visit(ShuffleNamedArgs(p_shuffle=p_apply)).code
+
+
+class ShuffleLiteralConstructors(cst.CSTTransformer):
+    """
+    Shuffle the literal construction of sets and dicts.
+
+    For example:
+        {a:b, c:d} is transformed to {c:d, a:b}
+
+    Note that this not entirely semantics preserving. If `{a():b(), c():d()}` and
+    the order of executing `a()`, `b()`, ... matters then the semantics will not be preserved.
+
+    """
+
+    def __init__(self, p_shuffle: float = 1, rng: Optional[Random] = None):
+        super().__init__()
+        if rng is None:
+            self._rng = Random()
+        else:
+            self._rng = rng
+
+        assert 0 <= p_shuffle <= 1, "Not a valid probability."
+        self._p_shuffle = p_shuffle
+
+    def _shuffle_elements(self, elements: Sequence):
+        elements_list = list(elements)
+        self._rng.shuffle(elements_list)
+        return elements_list
+
+    def leave_Set(self, original_node: cst.Set, updated_node: cst.Set) -> cst.Set:
+        if self._rng.random() > self._p_shuffle:
+            return updated_node
+        return updated_node.with_changes(elements=self._shuffle_elements(updated_node.elements))
+
+    def leave_Dict(self, original_node: cst.Dict, updated_node: cst.Dict) -> cst.Dict:
+        if self._rng.random() > self._p_shuffle:
+            return updated_node
+        return updated_node.with_changes(elements=self._shuffle_elements(updated_node.elements))
+
+    @classmethod
+    def apply(cls, code: str, p_apply: float = 1.0) -> str:
+        module: cst.Module = cst.parse_module(code)
+        wrapper = cst.MetadataWrapper(module)
+        return wrapper.visit(ShuffleLiteralConstructors(p_shuffle=p_apply)).code
+
+
+class RemoveTypeAnnotations(cst.CSTTransformer):
+    def __init__(self, p_remove: float = 1, rng: Optional[Random] = None):
+        super().__init__()
+        if rng is None:
+            self._rng = Random()
+        else:
+            self._rng = rng
+
+        assert 0 <= p_remove <= 1, "Not a valid probability."
+        self._p_remove = p_remove
+
+    def leave_AnnAssign(
+        self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign
+    ) -> Union[cst.Assign, cst.AnnAssign]:
+        if self._rng.random() > self._p_remove:
+            return updated_node
+        return cst.Assign(targets=[cst.AssignTarget(target=updated_node.target)], value=updated_node.value)
+
+    def leave_Param(self, original_node: cst.Param, updated_node: cst.Param) -> cst.Param:
+        if self._rng.random() > self._p_remove:
+            return updated_node
+        return updated_node.with_changes(annotation=None)
+
+    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
+        if self._rng.random() > self._p_remove or original_node.returns is None:
+            return updated_node
+        return updated_node.with_changes(returns=None)
+
+    @classmethod
+    def apply(cls, code: str, p_apply: float = 1.0) -> str:
+        module: cst.Module = cst.parse_module(code)
+        wrapper = cst.MetadataWrapper(module)
+        return wrapper.visit(RemoveTypeAnnotations(p_remove=p_apply)).code
+
+
 if __name__ == "__main__":
     import sys
 
@@ -356,7 +481,7 @@ if __name__ == "__main__":
 
     wrapper = cst.MetadataWrapper(module)
 
-    visitor = IfElseSwap(1)
+    visitor = ShuffleLiteralConstructors(1)
     result = wrapper.visit(visitor)
 
     print(result.code)

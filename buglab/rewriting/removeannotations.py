@@ -1,4 +1,4 @@
-from typing import Dict, Set
+from typing import Dict, Set, Union
 
 import libcst as cst
 from libcst.metadata import QualifiedName, QualifiedNameProvider
@@ -91,11 +91,17 @@ class RemoveTypeAnnotations(cst.CSTTransformer):
         super().__init__()
         self.annotations: Dict[str, cst.Annotation] = {}
 
-    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.Assign:
+    def leave_AnnAssign(
+        self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign
+    ) -> Union[cst.Assign, cst.RemovalSentinel]:
+        if updated_node.value is None:
+            # This is an annotation (nothing being assigned)
+            return cst.RemovalSentinel.REMOVE
+
         qual_names: Set[QualifiedName] = self.get_metadata(QualifiedNameProvider, original_node.target)
         for qname in qual_names:
             self.annotations[qname.name] = original_node.annotation
-        return cst.Assign(targets=[updated_node.target], value=updated_node.value)
+        return cst.Assign(targets=[cst.AssignTarget(target=updated_node.target)], value=updated_node.value)
 
     def leave_Param(self, original_node: cst.Param, updated_node: cst.Param) -> cst.Param:
         if original_node.annotation is not None:

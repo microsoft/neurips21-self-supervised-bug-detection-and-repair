@@ -1,13 +1,12 @@
 import argparse as argparse
 import logging
-from tempfile import TemporaryDirectory
-from threading import Thread
-
 import msgpack
 import zmq
 from dpu_utils.utils import RichPath, run_and_debug
+from tempfile import TemporaryDirectory
+from threading import Thread
 
-from buglab.utils.logging import MetricProvider, configure_logging
+from buglab.utils.loggingutils import MetricProvider, configure_logging
 from buglab.utils.msgpackutils import load_all_msgpack_l_gz
 from buglab.utils.replaybuffer import ReplayBuffer
 
@@ -59,7 +58,10 @@ def run(arguments):
 
     # Create a thread that subscribes to the data generating pipeline and updates itself
     buffer_subscription_thread = Thread(
-        target=lambda: connect_buffer_to_publisher(replay_buffer, arguments.data_pipeline_address),
+        target=lambda: connect_buffer_to_publisher(
+            replay_buffer,
+            arguments.data_pipeline_address,
+        ),
         name="data_pipeline_to_replay_buffer_thread",
         daemon=True,
     )

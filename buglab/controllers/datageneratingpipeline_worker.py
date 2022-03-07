@@ -1,13 +1,12 @@
 import argparse
 import logging
-import socket as s
-
 import msgpack
+import socket as s
 import zmq
 
 from buglab.controllers.buggydatacreation import extract_for_package
 from buglab.data.deduplication import DuplicationClient
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 
 LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +55,12 @@ if __name__ == "__main__":
         help="The number of semantics-preserving transformation per input file.",
     )
 
+    parser.add_argument(
+        "--hypergraphs",
+        action="store_true",
+        help="Set when using models with hypergraphs.",
+    )
+
     args = parser.parse_args()
 
     context = zmq.Context.instance()
@@ -76,6 +81,7 @@ if __name__ == "__main__":
         args.push_gateway_address,
         DuplicationClient(args.deduplication_server),
         num_semantics_preserving_transformations_per_file=args.num_semantics_preserving_transforms,
+        as_hypergraph=args.hypergraphs,
     )
     for extracted_function_code in extacted_data_iter:
         socket.send(msgpack.dumps(extracted_function_code))

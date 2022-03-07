@@ -1,22 +1,23 @@
-import argparse
-import logging
-from pathlib import Path
-from queue import Queue
-from threading import Thread
 from typing import NoReturn
 
+import argparse
+import logging
 import msgpack
+import time
 import yaml
 import zmq
 from dpu_utils.utils import RichPath, run_and_debug
+from pathlib import Path
 from ptgnn.baseneuralmodel import ModelTrainer
 from ptgnn.baseneuralmodel.utils.data import LazyDataIterable
+from queue import Queue
+from threading import Thread
 
 from buglab.data.modelsync import ModelSyncServer
 from buglab.models.modelregistry import load_model
 from buglab.models.utils import LinearWarmupScheduler, optimizer
 from buglab.utils.iteratorutils import limited_queue_iterator
-from buglab.utils.logging import MetricProvider, configure_logging
+from buglab.utils.loggingutils import MetricProvider, configure_logging
 from buglab.utils.msgpackutils import load_all_msgpack_l_gz
 
 metric_provider = MetricProvider("BugSelectorTraining")
@@ -99,11 +100,9 @@ def run(arguments):
     train_loss_metric = metric_provider.new_measure("training_loss")
     trainer.register_train_epoch_end_hook(lambda _, __, ___, metrics: train_loss_metric.record(metrics["Loss"]))
 
-    # TODO: when we run validation, log the validation loss.
-    # validation_loss_metric = metric_provider.new_measure("validation_loss")
-    # trainer.register_validation_epoch_end_hook(
-    #     lambda _, __, ___, metrics: validation_loss_metric.record(metrics["Loss"])
-    # )
+    def checkpoint_model(model, nn, epoch, metrics):
+        target_path = model_path.parent / f"selector-ckpt-{int(time.time())}.pkl.gz"
+        model.save(target_path, nn)
 
     def publish_created_model(model, nn, optimizer):
         nonlocal model_sync_server
@@ -136,19 +135,19 @@ def run(arguments):
         dummy_validation_metric = 42.0
         target_metric_improved = True
         publish_updated_model(trainer.model, trainer.neural_module)
-        return dummy_validation_metric, target_metric_improved
+        checkpoint_model(trainer.model, trainer.neural_module, None, None)
+        return dummy_validation_metric, target_metric_improved, {}
 
     trainer._run_validation = _run_validation
 
-    with model._tensorize_all_location_rewrites():
-        trainer.train(
-            training_data,
-            validation_data,
-            initialize_metadata=initialize_metadata,
-            parallelize=not arguments.sequential,
-            use_multiprocessing=False,
-            patience=10,
-        )
+    trainer.train(
+        training_data,
+        validation_data,
+        initialize_metadata=initialize_metadata,
+        parallelize=not arguments.sequential,
+        use_multiprocessing=False,
+        patience=10,
+    )
 
 
 if __name__ == "__main__":
@@ -230,7 +229,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-samples-between-eval",
         type=int,
-        default=1000,
+        default=10000,
         help="The number of samples to train on between reporting metrics and updating the model.",
     )
 

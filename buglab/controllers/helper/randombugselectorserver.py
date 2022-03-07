@@ -1,13 +1,13 @@
-import logging
-import random
-import sys
-from threading import Event
 from typing import Optional
 
+import logging
 import msgpack
+import random
+import sys
 import zmq
+from threading import Event
 
-from buglab.utils.logging import configure_logging
+from buglab.utils.loggingutils import configure_logging
 
 LOGGER = logging.getLogger(__name__)
 

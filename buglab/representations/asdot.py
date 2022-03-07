@@ -6,17 +6,20 @@ Usage:
 Options:
 
     --filter-range=<VAL>       Comma-separated start,end line.
+    --as-hypergraph
     -h --help                  Show this screen.
     --debug                    Enable debug routines. [default: False]
 """
-from pathlib import Path
-
+from copy import deepcopy
 from docopt import docopt
 from dpu_utils.utils import run_and_debug
 from libcst.metadata import CodeRange
+from pathlib import Path
 
 from buglab.representations.coderelations import compute_all_relations
 from buglab.representations.codereprs import PythonCodeRelations
+from buglab.representations.data import BugLabGraph
+from buglab.representations.hypergraph import convert_to_hypergraph
 
 
 def run(arguments):
@@ -31,20 +34,30 @@ def run(arguments):
             from_line, to_line = arguments["--filter-range"].split(",")
             target_range = CodeRange((int(from_line), 0), (int(to_line), 10000))
         else:
-            target_range = None
+            target_range = CodeRange((0, 0), (100000000, 10000))
 
-        rel_db.as_dot(
-            target_dot_filepath,
-            {
-                "LastMayWrite": "red",
-                "NextMayUse": "blue",
-                "OccurrenceOf": "green",
-                "ComputedFrom": "brown",
-                "NextToken": "hotpink",
-                "Sibling": "lightgray",
-            },
-            target_range,
-        )
+        if arguments["--as-hypergraph"]:
+            data, _ = rel_db.as_serializable(target_range, [])
+            nxt_token = deepcopy(data["edges"]["NextToken"])
+            hgraph, _ = convert_to_hypergraph(data)
+
+            # Include token sequence as a visualization aid
+            hgraph["edges"]["NextToken"] = nxt_token
+            BugLabGraph.to_dot(hgraph, target_dot_filepath, {})
+
+        else:
+            rel_db.as_dot(
+                target_dot_filepath,
+                {
+                    "LastMayWrite": "red",
+                    "NextMayUse": "blue",
+                    "OccurrenceOf": "green",
+                    "ComputedFrom": "brown",
+                    "NextToken": "hotpink",
+                    "Sibling": "lightgray",
+                },
+                target_range,
+            )
 
 
 if __name__ == "__main__":

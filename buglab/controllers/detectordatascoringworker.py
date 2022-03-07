@@ -1,21 +1,21 @@
+from typing import NoReturn
+
 import argparse
 import logging
 import math
-import time
-from itertools import cycle, islice
-from tempfile import TemporaryDirectory
-from threading import Thread
-from typing import NoReturn
-
 import msgpack
+import time
 import torch
 import zmq
 from dpu_utils.utils import run_and_debug
+from itertools import cycle, islice
+from tempfile import TemporaryDirectory
+from threading import Thread
 from tqdm import tqdm
 
 from buglab.controllers.helper.dummydatageneratingpipeline import get_data_from_folder
 from buglab.data.modelsync import MockModelSyncClient, ModelSyncClient
-from buglab.utils.logging import MetricProvider, configure_logging
+from buglab.utils.loggingutils import MetricProvider, configure_logging
 from buglab.utils.replaybuffer import ReplayBuffer
 
 metric_provider = MetricProvider("DetectorDataScoringWorker")

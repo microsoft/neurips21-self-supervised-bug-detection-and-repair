@@ -1,22 +1,24 @@
-import logging
-import multiprocessing
-import os
-from os import PathLike
-from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union
 
 import jedi
 import libcst as cst
+import logging
 import msgpack
+import multiprocessing
+import os
 import zmq
+from copy import deepcopy
 from jedi.api.environment import Environment
 from libcst.metadata import CodeRange
+from os import PathLike
+from pathlib import Path
 
 from buglab.data.deduplication import DuplicationClient
 from buglab.data.deduplication.tokenizers import python_dedup_tokenize_file
 from buglab.data.pypi.venv import create_venv_and_install
 from buglab.representations.coderelations import compute_all_relations
 from buglab.representations.codereprs import DummyEntity, PythonCodeRelations
+from buglab.representations.hypergraph import convert_buglab_sample_to_hypergraph
 from buglab.rewriting import (
     ALL_REWRITE_SCOUTS,
     AbstractRewriteOp,
@@ -26,7 +28,7 @@ from buglab.rewriting import (
 )
 from buglab.utils import call_with_timeout, detect_encoding_and_open
 from buglab.utils.cstutils import AllFunctionFinder, subsumes_code_range
-from buglab.utils.logging import LatencyRecorder, MetricProvider
+from buglab.utils.loggingutils import LatencyRecorder, MetricProvider
 
 LOGGER = logging.getLogger(__name__)
 metric_provider = MetricProvider("BuggyDataCreator")
@@ -241,9 +243,10 @@ def should_extract(
 def extract_for_package(
     package_name: str,
     bug_selector_server_address: str,
-    push_gateway_address: Optional[str] = "localhost:9091",
+    push_gateway_address: Optional[str] = None,
     deduplication_client: Optional[DuplicationClient] = None,
     num_semantics_preserving_transformations_per_file: int = 1,
+    as_hypergraph: bool = False,
 ) -> Iterator:
     """
     :param package_name: The name of the package.
@@ -280,4 +283,12 @@ def extract_for_package(
             )
             for ex in extracted_data:
                 samples_published.inc()
+                if as_hypergraph:
+                    ex = {
+                        "original": convert_buglab_sample_to_hypergraph(deepcopy(ex["original"])),
+                        "rewrites": {
+                            k: (convert_buglab_sample_to_hypergraph(deepcopy(g)), p)
+                            for k, (g, p) in ex["rewrites"].items()
+                        },
+                    }
                 yield ex

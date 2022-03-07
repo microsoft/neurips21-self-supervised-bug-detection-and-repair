@@ -1,9 +1,9 @@
+from typing import DefaultDict, FrozenSet, Set
+
+import libcst as cst
 from collections import defaultdict
 from copy import copy
 from itertools import chain
-from typing import DefaultDict, FrozenSet
-
-import libcst as cst
 from libcst.metadata import QualifiedName, QualifiedNameProvider, QualifiedNameSource
 
 from buglab.representations.codereprs import PythonCodeRelations

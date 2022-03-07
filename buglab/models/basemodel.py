@@ -1,12 +1,26 @@
-from collections import defaultdict
-from contextlib import contextmanager
-from typing import Dict, List, Optional, Tuple
-
-import numpy as np
-from dpu_utils.mlutils import Vocabulary
+from typing import Any, Callable, DefaultDict, Dict, Iterator, List, Literal, NamedTuple, Optional, Tuple, Union
 from typing_extensions import Final
 
-from buglab.representations.data import BugLabData
+import numpy as np
+import torch
+from collections import defaultdict
+from dpu_utils.mlutils import Vocabulary
+
+from buglab.models.rewrite_chooser_module import RewriteChooserInformation, RewriteChooserModule, RewriteLogprobs
+from buglab.representations.data import BugLabData, GraphData, HypergraphData
+
+
+class RewriteModuleSelectionInformation(NamedTuple):
+    # The nodes at which we can rewrite:
+    node_idxs: List[int]
+    # The potential replacements (aligned with `node_idxs`); can be IDs into vocab or other nodes
+    replacement_ids: List[int]
+    # Grouping index; same for all rewrites at same location (aligned with `node_idxs`):
+    loc_groups: List[int]
+    # The index of the correct choice in a given location group (if any such exists)
+    correct_choice_idx: Optional[int]
+    # The original index of the rewrite (in the set of rewrites for all modules)
+    original_idxs: List[int]
 
 
 class AbstractBugLabModel:
@@ -63,19 +77,27 @@ class AbstractBugLabModel:
         }
     )  # TODO: This is language specific
 
+    def __init__(
+        self,
+        *,
+        generator_loss_type: str = "classify-max-loss",
+        buggy_samples_weight_schedule: Callable[[int], float] = lambda _: 1.0,
+        repair_weight_schedule: Callable[[int], float] = lambda _: 1.0,
+        localization_module_type: Literal[
+            "CandidateQuery", "RewriteQuery", "CandidateAndRewriteQuery"
+        ] = "CandidateAndRewriteQuery",
+    ):
+        super().__init__()
+        self._init()
+        self._generator_loss_type = generator_loss_type
+        self._buggy_samples_weight_schedule = buggy_samples_weight_schedule
+        self._repair_weight_schedule = repair_weight_schedule
+        self._localization_module_type = localization_module_type
+
     def _init(self):
         self._target_rewrite_ops = Vocabulary.create_vocabulary(
             self.OPERATOR_REWRITES, max_size=len(self.OPERATOR_REWRITES), count_threshold=0, add_unk=False
         )
-        self._tensorize_only_at_target_location_rewrites = True
-
-    @contextmanager
-    def _tensorize_all_location_rewrites(self):
-        try:
-            self._tensorize_only_at_target_location_rewrites = False
-            yield
-        finally:
-            self._tensorize_only_at_target_location_rewrites = True
 
     def _compute_rewrite_data(self, datapoint: BugLabData, candidate_node_idxs: List[int]):
         # TODO: This function is awful. Any way to improve it?
@@ -88,7 +110,7 @@ class AbstractBugLabModel:
 
         call_args = defaultdict(list)
         all_nodes = datapoint["graph"]["nodes"]
-        for child_edge in datapoint["graph"]["edges"]["Child"]:
+        for child_edge in datapoint["graph"]["edges"].get("Child", []):
             if len(child_edge) == 3:
                 parent_idx, child_idx, edge_type = child_edge
             else:
@@ -97,17 +119,42 @@ class AbstractBugLabModel:
             if edge_type == "args" and all_nodes[parent_idx] == "Call":
                 call_args[parent_idx].append(child_idx)
 
-        incorrect_node_id_to_text_rewrite_target: Dict[int, List[int]] = defaultdict(list)
-        text_rewrite_original_idx: Dict[int, List[int]] = defaultdict(list)
-        correct_text_rewrite_target: Optional[Tuple[int, int]] = None
+        if "Child" not in datapoint["graph"]["edges"]:
+            # We are looking at hyperedges
+            for hyperedge in datapoint["graph"]["hyperedges"]:
+                # {'name': '$AstChild', 'docstring': None, 'args': {'func': [52], 'args': [51], '$rval': [49]}}
+                if hyperedge["name"] == "Child" and hyperedge.get("argtype", None) is not None:
+                    parent_idx = hyperedge["args"]["from"][0]
+                    child_idx = hyperedge["args"]["to"][0]
+                    edge_type = hyperedge["argtype"]
+                    if edge_type == "args" and all_nodes[parent_idx] == "Call":
+                        call_args[parent_idx].append(child_idx)
+                if (
+                    hyperedge["name"] != "$AstChild"
+                    or "func" not in hyperedge["args"]
+                    or "args" not in hyperedge["args"]
+                ):
+                    continue
 
-        misused_node_ids_to_candidates_symbol_node_ids: Dict[int, List[int]] = defaultdict(list)
-        varmisuse_rewrite_original_idx: Dict[int, List[int]] = defaultdict(list)
-        correct_misused_node_and_candidate: Optional[Tuple[int, int]] = None
+                arg_idx = 0
+                while True:
+                    argname = "args" + ("" if arg_idx == 0 else str(arg_idx))
+                    if argname not in hyperedge["args"]:
+                        break
+                    call_args[hyperedge["args"]["$rval"][0]].extend(hyperedge["args"][argname])
+                    arg_idx += 1
 
-        call_node_ids_to_candidate_swapped_node_ids: Dict[int, List[int]] = defaultdict(list)
-        swapped_rewrite_original_ids: Dict[int, List[int]] = defaultdict(list)
-        correct_swapped_call_and_pair: Optional[Tuple[int, int]] = None
+        text_rewrite_node_to_rewrite_id: Dict[int, List[int]] = defaultdict(list)
+        text_rewrite_original_idxs: Dict[int, List[int]] = defaultdict(list)
+        text_rewrite_correct_node_and_id: Optional[Tuple[int, int]] = None
+
+        varswap_node_ids_to_candidate_node_ids: Dict[int, List[int]] = defaultdict(list)
+        varswap_original_idx: Dict[int, List[int]] = defaultdict(list)
+        varswap_correct_node_and_candidate: Optional[Tuple[int, int]] = None
+
+        argswap_node_idxs_to_arg_replacement_node_idxs: Dict[int, List[int]] = defaultdict(list)
+        argswap_original_idx: Dict[int, List[int]] = defaultdict(list)
+        argswap_correct_node_and_candidate: Optional[Tuple[int, int]] = None
 
         for i, (node_idx, (rewrite_type, rewrite_data), (rewrite_scout, rewrite_metadata)) in enumerate(
             zip(
@@ -116,20 +163,16 @@ class AbstractBugLabModel:
                 datapoint["candidate_rewrite_metadata"],
             )
         ):
-            if self._tensorize_only_at_target_location_rewrites and node_idx != target_node_idx:
-                # During training we only care about the target rewrite.
-                continue
             is_target_action = target_fix_action_idx == i
 
             if rewrite_scout == "VariableMisuseRewriteScout":
                 if is_target_action:
-                    correct_misused_node_and_candidate = (
+                    varswap_correct_node_and_candidate = (
                         node_idx,
-                        len(misused_node_ids_to_candidates_symbol_node_ids[node_idx]),
+                        len(varswap_node_ids_to_candidate_node_ids[node_idx]),
                     )
-                misused_node_ids_to_candidates_symbol_node_ids[node_idx].append(rewrite_metadata)
-                varmisuse_rewrite_original_idx[node_idx].append(i)
-
+                varswap_node_ids_to_candidate_node_ids[node_idx].append(rewrite_metadata)
+                varswap_original_idx[node_idx].append(i)
             elif rewrite_scout == "ArgSwapRewriteScout":
                 arg_node_idxs = call_args[node_idx]
                 metadata = (
@@ -137,31 +180,29 @@ class AbstractBugLabModel:
                     arg_node_idxs[rewrite_data[1]],
                 )  # The to-be swapped node idxs
                 if is_target_action:
-                    correct_swapped_call_and_pair = (
+                    argswap_correct_node_and_candidate = (
                         node_idx,
-                        len(call_node_ids_to_candidate_swapped_node_ids[node_idx]),
+                        len(argswap_node_idxs_to_arg_replacement_node_idxs[node_idx]),
                     )
-                call_node_ids_to_candidate_swapped_node_ids[node_idx].append(metadata)
-                swapped_rewrite_original_ids[node_idx].append(i)
+                argswap_node_idxs_to_arg_replacement_node_idxs[node_idx].append(metadata)
+                argswap_original_idx[node_idx].append(i)
             else:
                 if is_target_action:
-                    correct_text_rewrite_target = (
+                    text_rewrite_correct_node_and_id = (
                         node_idx,
-                        len(incorrect_node_id_to_text_rewrite_target[target_node_idx]),
+                        len(text_rewrite_node_to_rewrite_id[target_node_idx]),
                     )
 
-                incorrect_node_id_to_text_rewrite_target[node_idx].append(
-                    self._target_rewrite_ops.get_id_or_unk(rewrite_data)
-                )
-                text_rewrite_original_idx[node_idx].append(i)
+                text_rewrite_node_to_rewrite_id[node_idx].append(self._target_rewrite_ops.get_id_or_unk(rewrite_data))
+                text_rewrite_original_idxs[node_idx].append(i)
         repr_location_group_ids = {location_node_idx: i for i, location_node_idx in enumerate(candidate_node_idxs)}
 
         def to_flat_node_selection(
             candidates: Dict[int, List],
             correct_candidate: Optional[Tuple[int, int]],
             original_rewrite_idxs: Dict[int, List[int]],
-        ) -> Tuple[List[int], List[int], List[int], Optional[int], List[int]]:
-            node_selection_repr_node_ids, candidate_node_ids, candidate_node_to_repr_node = [], [], []
+        ) -> RewriteModuleSelectionInformation:
+            node_selection_repr_node_ids, candidate_node_ids, candidate_node_to_group_id = [], [], []
             flat_original_rewrite_idxs: List[int] = []
 
             correct_idx = None
@@ -173,87 +214,45 @@ class AbstractBugLabModel:
                 group_idx = repr_location_group_ids[repr_node_id]
                 flat_original_rewrite_idxs.extend(original_rewrite_idxs[repr_node_id])
 
-                candidate_node_to_repr_node.extend((group_idx for _ in candidate_nodes))
-            return (
-                node_selection_repr_node_ids,
-                candidate_node_ids,
-                candidate_node_to_repr_node,
-                correct_idx,
-                flat_original_rewrite_idxs,
+                candidate_node_to_group_id.extend((group_idx for _ in candidate_nodes))
+            return RewriteModuleSelectionInformation(
+                node_idxs=node_selection_repr_node_ids,
+                replacement_ids=candidate_node_ids,
+                loc_groups=candidate_node_to_group_id,
+                correct_choice_idx=correct_idx,
+                original_idxs=flat_original_rewrite_idxs,
             )
 
-        # Text rewrites
-        (
-            target_rewrite_node_ids,
-            target_rewrites,
-            target_rewrite_to_location_group,
-            correct_rewrite_target,
-            text_rewrite_original_idx,
-        ) = to_flat_node_selection(
-            incorrect_node_id_to_text_rewrite_target, correct_text_rewrite_target, text_rewrite_original_idx
-        )
-        # Single node-candidates (var misuse)
-        (
-            varmisused_node_ids,
-            candidate_symbol_node_ids,
-            candidate_symbol_to_varmisused_location,
-            correct_candidate_symbol_node,
-            varmisuse_rewrite_original_idx,
-        ) = to_flat_node_selection(
-            misused_node_ids_to_candidates_symbol_node_ids,
-            correct_misused_node_and_candidate,
-            varmisuse_rewrite_original_idx,
-        )
-        # Two node-candidates (arg swapping)
-        (
-            call_node_ids,
-            candidate_swapped_node_ids,
-            swapped_pair_to_call,
-            correct_swapped_pair,
-            swapped_rewrite_original_ids,
-        ) = to_flat_node_selection(
-            call_node_ids_to_candidate_swapped_node_ids, correct_swapped_call_and_pair, swapped_rewrite_original_ids
-        )
+        num_rewrite_locations = len(repr_location_group_ids)
         return (
-            # Rewrites
-            target_rewrite_node_ids,
-            target_rewrites,
-            target_rewrite_to_location_group,
-            correct_rewrite_target,
-            text_rewrite_original_idx,
-            # VarMisuse
-            varmisused_node_ids,
-            candidate_symbol_to_varmisused_location,
-            candidate_symbol_node_ids,
-            correct_candidate_symbol_node,
-            varmisuse_rewrite_original_idx,
-            # Arg Swap
-            call_node_ids,
-            candidate_swapped_node_ids,
-            correct_swapped_pair,
-            swapped_pair_to_call,
-            swapped_rewrite_original_ids,
-            # All rewrites
-            repr_location_group_ids,
+            to_flat_node_selection(
+                text_rewrite_node_to_rewrite_id, text_rewrite_correct_node_and_id, text_rewrite_original_idxs
+            ),
+            to_flat_node_selection(
+                varswap_node_ids_to_candidate_node_ids, varswap_correct_node_and_candidate, varswap_original_idx
+            ),
+            to_flat_node_selection(
+                argswap_node_idxs_to_arg_replacement_node_idxs, argswap_correct_node_and_candidate, argswap_original_idx
+            ),
+            num_rewrite_locations,
         )
 
     def _iter_per_sample_results(
         self,
-        mb_data,
-        candidate_location_sample_idx,
-        candidate_location_log_probs,
-        arg_swap_logprobs,
-        num_samples,
-        original_datapoints,
-        text_repair_logprobs,
-        varmisuse_logprobs,
-        node_mappings: List[Dict[int, int]] = None,
+        mb_data: Dict[str, Any],
+        rewrite_info: RewriteChooserInformation,
+        rewrite_logprobs: RewriteLogprobs,
+        original_datapoints: List[Optional[BugLabData]],
     ):
-        localization_distribution = defaultdict(list)
-        for sample_idx in range(len(candidate_location_sample_idx)):
-            localization_distribution[candidate_location_sample_idx[sample_idx]].append(
-                candidate_location_log_probs[sample_idx]
-            )
+        localization_distribution: DefaultDict[int, float] = defaultdict(list)
+        for loc_idx, loc_logprob in enumerate(rewrite_logprobs.localization_logprobs):
+            # The last num_samples entries in localization_logprobs are for the virtual "NO_BUG" locations
+            # which aren't in the loc_to_sample map:
+            if loc_idx < len(rewrite_info.rewritable_loc_to_sample_id):
+                sample_idx = rewrite_info.rewritable_loc_to_sample_id[loc_idx].item()
+            else:
+                sample_idx = loc_idx - len(rewrite_info.rewritable_loc_to_sample_id)
+            localization_distribution[sample_idx].append(loc_logprob.item())
         # The following should be an array of 1s:
         # np.sum(np.exp(np.array(list(localization_distribution.values()))), axis=-1)
 
@@ -265,20 +264,25 @@ class AbstractBugLabModel:
                 rewrite_probs_per_group[location_group_idx].append(rewrite_logprob)
             return rewrite_probs_per_group
 
-        arg_swap_logprobs_per_group = logprobs_per_group(
-            arg_swap_logprobs, mb_data["swapped_pair_to_call_location_group"]
+        text_repair_logprobs_per_group = logprobs_per_group(
+            rewrite_logprobs.text_rewrite_logprobs, mb_data["text_rewrite_to_loc_group"]
         )
-        text_repair_logprobs_per_group = logprobs_per_group(text_repair_logprobs, mb_data["rewrite_to_location_group"])
         varmisuse_logprobs_per_group = logprobs_per_group(
-            varmisuse_logprobs, mb_data["candidate_symbol_to_location_group"]
+            rewrite_logprobs.varswap_logprobs, mb_data["varswap_to_loc_group"]
+        )
+        arg_swap_logprobs_per_group = logprobs_per_group(
+            rewrite_logprobs.argswap_logprobs, mb_data["argswap_to_loc_group"]
         )
 
         next_location_group_idx = 0
-        for sample_idx in range(num_samples):
-            original_point: BugLabData = original_datapoints[sample_idx]
+        for sample_idx in range(rewrite_info.num_samples):
+            original_point: Optional[BugLabData] = original_datapoints[sample_idx]
+            if original_point is None:
+                raise ValueError("Expected to have access to original datapoint")
             # We rely on the fact that the candidate nodes are not reordered and appear sorted.
             ref_nodes = original_point["graph"]["reference_nodes"]
             candidate_node_idxs = np.unique(ref_nodes)
+            node_mappings = mb_data.get("node_mappings")
             if node_mappings is not None:
                 # ref_nodes = [node_mappings[sample_idx][k] for k in ref_nodes] <- unused, but keep in mind.
                 candidate_node_idxs = np.array([node_mappings[sample_idx][k] for k in candidate_node_idxs])
@@ -296,9 +300,9 @@ class AbstractBugLabModel:
             }
             location_logprobs[-1] = localization_distribution[sample_idx][-1]
 
-            text_rewrite_original_idx = mb_data["text_rewrite_original_idxs"][sample_idx]
-            candidate_rewrite_original_idx = mb_data["candidate_rewrite_original_idxs"][sample_idx]
-            pair_rewrite_original_idx = mb_data["pair_rewrite_original_idx"][sample_idx]
+            text_rewrite_original_idxs = mb_data["text_rewrite_original_idxs"][sample_idx]
+            candidate_rewrite_original_idx = mb_data["varswap_original_idxs"][sample_idx]
+            argswap_original_idxs = mb_data["argswap_original_idxs"][sample_idx]
 
             flat_arg_swap_logprobs, flat_text_repair_logprobs, flat_var_misuse_logprob = [], [], []
             for _ in range(len(np.unique(original_point["graph"]["reference_nodes"]))):
@@ -307,9 +311,9 @@ class AbstractBugLabModel:
                 flat_var_misuse_logprob.extend(varmisuse_logprobs_per_group[next_location_group_idx])
                 next_location_group_idx += 1
 
-            assert len(text_rewrite_original_idx) == len(flat_text_repair_logprobs)
+            assert len(text_rewrite_original_idxs) == len(flat_text_repair_logprobs)
             assert len(candidate_rewrite_original_idx) == len(flat_var_misuse_logprob)
-            assert len(pair_rewrite_original_idx) == len(flat_arg_swap_logprobs)
+            assert len(argswap_original_idxs) == len(flat_arg_swap_logprobs)
             rewrite_probs = [None] * len(original_point["candidate_rewrites"])
 
             def write_in_place(idxs, logprobs):
@@ -317,9 +321,9 @@ class AbstractBugLabModel:
                     assert rewrite_probs[i] is None
                     rewrite_probs[i] = lprob
 
-            write_in_place(text_rewrite_original_idx, flat_text_repair_logprobs)
+            write_in_place(text_rewrite_original_idxs, flat_text_repair_logprobs)
             write_in_place(candidate_rewrite_original_idx, flat_var_misuse_logprob)
-            write_in_place(pair_rewrite_original_idx, flat_arg_swap_logprobs)
+            write_in_place(argswap_original_idxs, flat_arg_swap_logprobs)
 
             assert None not in rewrite_probs
             if node_mappings is not None:
@@ -344,3 +348,23 @@ class AbstractBugLabModel:
             # should be equal to 1 (up to floating point errors).
 
             yield original_point, location_logprobs, rewrite_probs
+
+    def predict(
+        self, data: Iterator[BugLabData], trained_nn: RewriteChooserModule, device, parallelize: bool
+    ) -> Iterator[Tuple[BugLabData, Dict[int, float], List[float]]]:
+        trained_nn.eval()
+        with torch.no_grad():
+            for mb_data, original_datapoints in self.minibatch_iterator(
+                self.tensorize_dataset(data, return_input_data=True, parallelize=parallelize),
+                device,
+                max_minibatch_size=50,
+                parallelize=parallelize,
+            ):
+                rc_info = trained_nn.compute_rewrite_chooser_information(**mb_data)
+                rewrite_logprobs = trained_nn.compute_rewrite_logprobs(rc_info)
+                yield from self._iter_per_sample_results(
+                    mb_data,
+                    rewrite_info=rc_info,
+                    rewrite_logprobs=rewrite_logprobs,
+                    original_datapoints=original_datapoints,
+                )

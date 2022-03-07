@@ -1,10 +1,10 @@
-import logging
-from collections import defaultdict
-from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
+import logging
 import numpy as np
 import torch
-from ptgnn.baseneuralmodel import AbstractNeuralModel, ModuleWithMetrics
+from collections import defaultdict
+from ptgnn.baseneuralmodel import AbstractNeuralModel
 from ptgnn.neuralmodels.embeddings.strelementrepresentationmodel import (
     CharUnitEmbedder,
     StrElementRepresentationModel,
@@ -12,57 +12,36 @@ from ptgnn.neuralmodels.embeddings.strelementrepresentationmodel import (
     TokenUnitEmbedder,
 )
 from torch import nn
-from typing_extensions import Literal
 
-from buglab.models.basemodel import AbstractBugLabModel
-from buglab.models.layers.fixermodules import (
-    CandidatePairSelectorModule,
-    SingleCandidateNodeSelectorModule,
-    TextRepairModule,
-)
-from buglab.models.layers.localizationmodule import LocalizationModule
+from buglab.models.basemodel import AbstractBugLabModel, RewriteModuleSelectionInformation
 from buglab.models.layers.relational_transformer import RelationalTransformerEncoderLayer
-from buglab.models.utils import compute_generator_loss, scatter_log_softmax
+from buglab.models.rewrite_chooser_module import RewriteChooserInformation, RewriteChooserModule
 from buglab.representations.data import BugLabData, BugLabGraph
 
 LOGGER = logging.getLogger(__name__)
 
 
 class SeqModelTensorizedSample(NamedTuple):
-    target_subtokens_ids: List[int]
+    input_token_ids: List[Union[int, List[int], np.ndarray]]
     intra_token_edges: Dict[str, List[Tuple[int, int]]]
-    candidate_location_idxs: List[int]
 
-    target_location_idx: Optional[int]
+    rewritable_loc_idxs: List[int]
+    rewritten_node_idx: Optional[int]
 
     node_mappings: Dict[int, int]
 
     # Bug repair
-    target_rewrite_node_ids: List[int]
-    target_rewrites: List[int]
-    target_rewrite_to_location_group: List[int]
-    correct_rewrite_target: Optional[int]
-    text_rewrite_original_idx: List[int]
-
-    varmisused_node_ids: List[int]
-    candidate_symbol_node_ids: List[int]
-    candidate_symbol_to_varmisused_node: List[int]
-    correct_candidate_symbol_node: Optional[int]
-    candidate_rewrite_original_idx: List[int]
-
-    call_node_ids: List[int]
-    candidate_swapped_node_ids: List[int]
-    swapped_pair_to_call: List[int]
-    correct_swapped_pair: Optional[int]
-    pair_rewrite_original_idx: List[int]
+    text_rewrites_info: RewriteModuleSelectionInformation
+    varswap_rewrites_info: RewriteModuleSelectionInformation
+    argswap_rewrites_info: RewriteModuleSelectionInformation
 
     num_rewrite_locations_considered: int
 
     # Bug selection
-    rewrite_logprobs: Optional[List[float]]
+    observed_rewrite_logprobs: Optional[List[float]]
 
 
-class SeqBugLabModule(ModuleWithMetrics):
+class SeqBugLabModule(RewriteChooserModule):
     def __init__(
         self,
         token_embedder: Union[TokenUnitEmbedder, SubtokenUnitEmbedder, CharUnitEmbedder],
@@ -72,15 +51,12 @@ class SeqBugLabModule(ModuleWithMetrics):
         num_heads: int,
         intermediate_dimension: int,
         dropout_rate: float,
-        rewrite_vocabulary_size: int,
         layer_type: Literal["great", "rat", "transformer", "gru"] = "great",
-        buggy_samples_weight_schedule: Callable[[int], float] = lambda _: 1.0,
-        generator_loss_type: Optional[str] = "norm-kl",
         rezero_mode: Literal["off", "scalar", "vector"] = "off",
         normalisation_mode: Literal["off", "prenorm", "postnorm"] = "postnorm",
+        **kwargs,
     ):
-        super().__init__()
-        self.__generator_loss_type = generator_loss_type
+        super().__init__(entity_repr_size=embedding_dim, **kwargs)
         self.__token_embedder = token_embedder
 
         self.__positional_encoding = nn.Parameter(torch.randn(1, 5000, embedding_dim), requires_grad=True)
@@ -130,225 +106,7 @@ class SeqBugLabModule(ModuleWithMetrics):
         else:
             raise ValueError(f"Unrecognized layer type `{layer_type}`.")
 
-        output_representation_size = embedding_dim
-        self.__localization_module = LocalizationModule(
-            output_representation_size, buggy_samples_weight_schedule=buggy_samples_weight_schedule
-        )
-        self._buggy_samples_weight_schedule = buggy_samples_weight_schedule
-
-        self._text_repair_module = TextRepairModule(embedding_dim, rewrite_vocabulary_size)
-        self._varmisuse_module = SingleCandidateNodeSelectorModule(embedding_dim)
-        self._argswap_module = CandidatePairSelectorModule(embedding_dim)
-
-    def _reset_module_metrics(self) -> None:
-        if not hasattr(self, "_epoch_idx"):
-            self._epoch_idx = 0
-        elif self.training and self.__num_batches > 0:
-            # Assumes that module metrics are reset once per epoch.
-            self._epoch_idx += 1
-
-        self.__loss = 0.0
-        self.__repair_loss = 0.0
-
-        self.__total_samples = 0
-        self.__num_batches = 0
-
-    def _module_metrics(self) -> Dict[str, Any]:
-        metrics = {}
-        if self.__total_samples > 0:
-            metrics["Repair Loss"] = self.__repair_loss / self.__total_samples
-        if self.__num_batches > 0:
-            metrics["Loss"] = self.__loss / self.__num_batches
-        return metrics
-
-    def _compute_repair_logprobs(
-        self,
-        output_representations,
-        target_rewrite_node_ids,
-        target_rewrites,
-        rewrite_to_location_group,
-        varmisused_node_ids,
-        candidate_symbol_node_ids,
-        candidate_symbol_to_location_group,
-        call_node_ids,
-        candidate_swapped_node_ids,
-        swapped_pair_to_call_location_group,
-    ):
-        if target_rewrites.shape[0] > 0:
-            text_repair_logits = self._text_repair_module.compute_rewrite_logits(
-                target_rewrite_node_representations=output_representations[
-                    target_rewrite_node_ids[:, 0], target_rewrite_node_ids[:, 1]
-                ],
-                candidate_rewrites=target_rewrites,
-            )
-        else:
-            text_repair_logits = torch.zeros(0, device=target_rewrites.device)
-
-        if varmisused_node_ids.shape[0] > 0:
-            varmisuse_logits = self._varmisuse_module.compute_per_slot_log_probability(
-                slot_representations_per_target=output_representations[
-                    varmisused_node_ids[:, 0], varmisused_node_ids[:, 1]
-                ],
-                target_nodes_representations=output_representations[
-                    candidate_symbol_node_ids[:, 0], candidate_symbol_node_ids[:, 1]
-                ],
-            )
-        else:
-            varmisuse_logits = torch.zeros(0, device=varmisused_node_ids.device)
-
-        if call_node_ids.shape[0] > 0:
-            arg_swap_logits = self._argswap_module.compute_per_pair_logits(
-                slot_representations_per_pair=output_representations[call_node_ids[:, 0], call_node_ids[:, 1]],
-                pair_representations=output_representations[
-                    candidate_swapped_node_ids[:, 0].unsqueeze(-1), candidate_swapped_node_ids[:, 1:]
-                ],
-            )
-        else:
-            arg_swap_logits = torch.zeros(0, device=call_node_ids.device)
-
-        all_logits = torch.cat((text_repair_logits, varmisuse_logits, arg_swap_logits))
-        logit_groups = torch.cat(
-            (rewrite_to_location_group, candidate_symbol_to_location_group, swapped_pair_to_call_location_group)
-        )
-        logprobs = scatter_log_softmax(all_logits, index=logit_groups)
-        text_repair_logprobs, varmisuse_logprobs, arg_swap_logprobs = torch.split(
-            logprobs, [text_repair_logits.shape[0], varmisuse_logits.shape[0], arg_swap_logits.shape[0]]
-        )
-        return arg_swap_logprobs, text_repair_logprobs, varmisuse_logprobs
-
-    def _compute_localization_logprobs(self, candidate_reprs, candidate_to_sample_idx, num_samples):
-        candidate_to_sample_idx, candidate_log_probs, _ = self.__localization_module.compute_localization_logprobs(
-            candidate_reprs, candidate_to_sample_idx, num_samples
-        )
-        return candidate_to_sample_idx, candidate_log_probs
-
-    def forward(
-        self,
-        *,
-        input_sequence_ids,
-        input_seq_num_subtokens,
-        token_sequence_lengths,
-        edges,
-        edge_types,
-        has_bug,
-        candidate_location_idxs,
-        target_location_idxs,
-        # Text repair
-        target_rewrite_node_ids: torch.IntTensor,
-        target_rewrites: torch.IntTensor,
-        rewrite_to_location_group: torch.IntTensor,
-        correct_rewrite_idxs: torch.IntTensor,
-        text_rewrite_idxs: torch.IntTensor,
-        # Var Misuse
-        varmisused_node_ids: torch.IntTensor,
-        candidate_symbol_node_ids: torch.IntTensor,
-        candidate_symbol_to_location_group: torch.IntTensor,
-        correct_candidate_symbols: torch.IntTensor,
-        candidate_rewrite_idxs: torch.IntTensor,
-        # ArgSwap
-        call_node_ids: torch.IntTensor,
-        candidate_swapped_node_ids: torch.IntTensor,
-        swapped_pair_to_call_location_group: torch.IntTensor,
-        correct_swapped_pair: torch.IntTensor,
-        pair_rewrite_idxs: torch.IntTensor,
-        # Rewrite logprobs
-        rewrite_to_graph_id: Optional[torch.IntTensor] = None,
-        rewrite_logprobs: Optional[torch.FloatTensor] = None,
-        **kwargs,  # Visualization data (ignored)
-    ):
-        """
-        :param input_sequence_ids: [B, max_seq_len]
-        :param input_sequence_lengths: The size of the input sequence [B]
-        :param token_sequence_lengths: The size of the tokens in the input sequence (excluding symbols) [B]
-        :param edges: [num_edges, 3]
-        :param edge_types: [num_edges]
-        :param has_bug: [B]
-        :param candidate_location_idxs: [num_target_locations, 2]
-        :param target_location_idxs: [B]
-        """
-        output_representation = self._compute_output_representation(
-            input_sequence_ids, input_seq_num_subtokens, token_sequence_lengths, edges, edge_types
-        )
-
-        target_location_representations = output_representation[
-            candidate_location_idxs[:, 0], candidate_location_idxs[:, 1]
-        ]  # [num_candidate_points, H]
-
-        # Repair
-        arg_swap_logprobs, text_repair_logprobs, varmisuse_logprobs = self._compute_repair_logprobs(
-            output_representation,
-            target_rewrite_node_ids,
-            target_rewrites,
-            rewrite_to_location_group,
-            varmisused_node_ids,
-            candidate_symbol_node_ids,
-            candidate_symbol_to_location_group,
-            call_node_ids,
-            candidate_swapped_node_ids,
-            swapped_pair_to_call_location_group,
-        )
-
-        if rewrite_logprobs is not None:
-            candidate_to_sample_idx = candidate_location_idxs[:, 0]
-            loss_type = self.__generator_loss_type
-            # Note: the command
-            # torch.exp(torch_scatter.scatter_logsumexp(localization_logprobs, torch.cat((candidate_to_sample_idx, arange))))
-            # should give a tensor of ones here (total probabilities).
-            _, localization_logprobs, arrange, = self.__localization_module.compute_localization_logprobs(
-                candidate_reprs=target_location_representations,
-                candidate_to_sample_idx=candidate_to_sample_idx,
-                num_samples=has_bug.shape[0],
-            )
-
-            loss = compute_generator_loss(
-                arg_swap_logprobs,
-                arrange,
-                candidate_rewrite_idxs,
-                candidate_symbol_to_location_group,
-                localization_logprobs,
-                loss_type,
-                pair_rewrite_idxs,
-                rewrite_logprobs,
-                rewrite_to_graph_id,
-                rewrite_to_location_group,
-                swapped_pair_to_call_location_group,
-                text_repair_logprobs,
-                text_rewrite_idxs,
-                varmisuse_logprobs,
-            )
-
-            with torch.no_grad():
-                self.__loss += float(loss)
-                self.__num_batches += 1
-
-            return loss
-
-        else:
-            localization_loss = self.__localization_module(
-                candidate_reprs=target_location_representations,
-                candidate_to_sample_idx=candidate_location_idxs[:, 0],
-                has_bug=has_bug,
-                correct_candidate_idxs=target_location_idxs,
-            )
-
-            text_repair_loss = self._text_repair_module(text_repair_logprobs, correct_rewrite_idxs)
-            varmisuse_repair_loss = self._varmisuse_module(varmisuse_logprobs, correct_candidate_symbols)
-            arg_swap_repair_loss = self._argswap_module(arg_swap_logprobs, correct_swapped_pair)
-
-            buggy_samples_weight = self._buggy_samples_weight_schedule(self._epoch_idx)
-            repair_loss = text_repair_loss.sum() + varmisuse_repair_loss.sum() + arg_swap_repair_loss.sum()
-            repair_loss = repair_loss * buggy_samples_weight
-
-            with torch.no_grad():
-                self.__total_samples += float(has_bug.sum().cpu())
-                self.__repair_loss += float(repair_loss)
-
-                self.__num_batches += 1
-                self.__loss += float(localization_loss + repair_loss / has_bug.shape[0])
-
-            return localization_loss + repair_loss / has_bug.shape[0]
-
-    def _compute_output_representation(
+    def _compute_code_representation(
         self, input_sequence_ids, input_seq_num_subtokens, token_sequence_lengths, edges, edge_types
     ):
         output_representation = self.__token_embedder(
@@ -395,6 +153,61 @@ class SeqBugLabModule(ModuleWithMetrics):
 
         return output_representation
 
+    def compute_rewrite_chooser_information(
+        self,
+        *,
+        # Model-specific representation of code:
+        input_sequence_ids,
+        input_seq_num_subtokens,
+        token_sequence_lengths,
+        edges,
+        edge_types,
+        # Rewrite info:
+        rewritable_loc_idxs: torch.Tensor,
+        # Text repair
+        text_rewrite_tok_idxs: torch.Tensor,
+        text_rewrite_replacement_ids: torch.Tensor,
+        text_rewrite_to_loc_group: torch.Tensor,
+        # Var Misuse
+        varswap_tok_idxs: torch.Tensor,
+        varswap_replacement_tok_idxs: torch.Tensor,
+        varswap_to_loc_group: torch.Tensor,
+        # ArgSwap
+        argswap_tok_idxs: torch.Tensor,
+        argswap_replacement_tok_idxs: torch.Tensor,
+        argswap_to_loc_group: torch.Tensor,
+        # Other inputs that we don't consume:
+        **kwargs,
+    ) -> RewriteChooserInformation:
+        code_representation = self._compute_code_representation(
+            input_sequence_ids, input_seq_num_subtokens, token_sequence_lengths, edges, edge_types
+        )  # [B, max_seq_len, D]
+
+        return RewriteChooserInformation(
+            num_samples=code_representation.shape[0],
+            rewritable_loc_reprs=code_representation[rewritable_loc_idxs[:, 0], rewritable_loc_idxs[:, 1]],
+            rewritable_loc_to_sample_id=rewritable_loc_idxs[:, 0],
+            text_rewrite_loc_reprs=code_representation[text_rewrite_tok_idxs[:, 0], text_rewrite_tok_idxs[:, 1]],
+            text_rewrite_replacement_ids=text_rewrite_replacement_ids,
+            text_rewrite_to_loc_group=text_rewrite_to_loc_group,
+            varswap_loc_reprs=code_representation[varswap_tok_idxs[:, 0], varswap_tok_idxs[:, 1]],
+            varswap_replacement_reprs=code_representation[
+                varswap_replacement_tok_idxs[:, 0], varswap_replacement_tok_idxs[:, 1]
+            ],
+            varswap_to_loc_group=varswap_to_loc_group,
+            argswap_loc_reprs=code_representation[argswap_tok_idxs[:, 0], argswap_tok_idxs[:, 1]],
+            # This is special, because argswap_replacement_tok_idxs has shape [?, 3], with the first being the sample
+            # index and the remaining ones being the token indices in that sample.
+            argswap_replacement_reprs=code_representation[
+                argswap_replacement_tok_idxs[:, 0].unsqueeze(-1), argswap_replacement_tok_idxs[:, 1:]
+            ],
+            argswap_to_loc_group=argswap_to_loc_group,
+        )
+
+    def forward(self, **kwargs):
+        rc_info = self.compute_rewrite_chooser_information(**kwargs)
+        return self.compute_loss(rc_info=rc_info, **kwargs)
+
 
 class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, SeqBugLabModule], AbstractBugLabModel):
     def __init__(
@@ -407,22 +220,20 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
         num_heads: int = 8,
         num_layers: int = 6,
         intermediate_dimension_size: int = 2048,
-        buggy_samples_weight_schedule: Callable[[int], float] = lambda _: 1.0,
-        generator_loss_type: Optional[str] = "classify-max-loss",
         rezero_mode: Literal["off", "scalar", "vector"] = "off",
         normalisation_mode: Literal["off", "prenorm", "postnorm"] = "postnorm",
+        **kwargs,
     ):
         super().__init__()
+        AbstractBugLabModel.__init__(self, **kwargs)
         self._init()
-        self.__tensorize_only_at_target_location_rewrites = True
-        self.__edge_types = set()
+        self._edge_types = set()
 
-        self.__dropout_rate = dropout_rate
-        self.__representation_size = representation_size
-        self.__layer_type = layer_type
+        self._dropout_rate = dropout_rate
+        self._layer_type = layer_type
 
-        self.__max_seq_size = max_seq_size
-        self.__token_embedder = StrElementRepresentationModel(
+        self._max_seq_size = max_seq_size
+        self._token_embedder = StrElementRepresentationModel(
             token_splitting="subtoken",
             embedding_size=representation_size,
             dropout_rate=dropout_rate,
@@ -430,14 +241,11 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
             subtoken_combination="max",
         )
 
-        self.__buggy_samples_weight_schedule = buggy_samples_weight_schedule
-
-        self.__num_heads = num_heads
-        self.__num_layers = num_layers
-        self.__intermediate_dimension_size = intermediate_dimension_size
-        self.__generator_loss_type = generator_loss_type
-        self.__rezero_mode = rezero_mode
-        self.__normalisation_mode = normalisation_mode
+        self._num_heads = num_heads
+        self._num_layers = num_layers
+        self._intermediate_dimension_size = intermediate_dimension_size
+        self._rezero_mode = rezero_mode
+        self._normalisation_mode = normalisation_mode
 
     def __to_token_data(self, graph: BugLabGraph):
         # Get token list
@@ -573,7 +381,7 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
         next_token_edges = {f: t for f, t in graph["edges"]["NextToken"]}
         first_token = set(next_token_edges.keys()) - set(next_token_edges.values())
         if len(first_token) != 1:
-            LOGGER.error(f"Encountered graph where the tokens are not connected in %s", graph["path"])
+            LOGGER.error(f"Encountered graph where the tokens are not connected in {graph['path']}")
             return []
         first_token_idx = next(iter(first_token))
 
@@ -591,7 +399,7 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
 
         try:
             token_sequence = list(get_token_sequence())
-        except:
+        except Exception:
             return []
         if len(token_sequence) != len(next_token_edges) + 1:
             LOGGER.error("Broken token sequence in %s", graph["path"])
@@ -609,36 +417,34 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
         node_labels, _, edges, _ = token_data
 
         for n in node_labels:
-            self.__token_embedder.update_metadata_from(n)
+            self._token_embedder.update_metadata_from(n)
 
-        self.__edge_types.update(edges.keys())
+        self._edge_types.update(edges.keys())
 
     def finalize_metadata(self) -> None:
-        self.__edge_types = list(self.__edge_types)
-        self.__edge_type_to_idx = {t: i for i, t in enumerate(self.__edge_types)}
+        self._edge_types = list(self._edge_types)
+        self._edge_type_to_idx = {t: i for i, t in enumerate(self._edge_types)}
 
     def build_neural_module(self) -> SeqBugLabModule:
         return SeqBugLabModule(
-            token_embedder=self.__token_embedder.build_neural_module(),
-            embedding_dim=self.__token_embedder.embedding_size,
-            num_edge_types=len(self.__edge_types),
-            num_layers=self.__num_layers,
-            num_heads=self.__num_heads,
-            intermediate_dimension=self.__intermediate_dimension_size,
-            dropout_rate=self.__dropout_rate,
+            token_embedder=self._token_embedder.build_neural_module(),
+            embedding_dim=self._token_embedder.embedding_size,
+            num_edge_types=len(self._edge_types),
+            num_layers=self._num_layers,
+            num_heads=self._num_heads,
+            intermediate_dimension=self._intermediate_dimension_size,
+            dropout_rate=self._dropout_rate,
             rewrite_vocabulary_size=len(self._target_rewrite_ops),
-            layer_type=self.__layer_type,
-            buggy_samples_weight_schedule=self.__buggy_samples_weight_schedule,
-            generator_loss_type=self.__generator_loss_type,
-            rezero_mode=self.__rezero_mode,
-            normalisation_mode=self.__normalisation_mode,
+            layer_type=self._layer_type,
+            buggy_samples_weight_schedule=self._buggy_samples_weight_schedule,
+            repair_weight_schedule=self._repair_weight_schedule,
+            generator_loss_type=self._generator_loss_type,
+            rezero_mode=self._rezero_mode,
+            normalisation_mode=self._normalisation_mode,
+            localization_module_type=self._localization_module_type,
         )
 
     def tensorize(self, datapoint: BugLabData) -> Optional[SeqModelTensorizedSample]:
-
-        if "candidate_rewrite_logprobs" in datapoint:
-            assert not self._tensorize_only_at_target_location_rewrites
-
         try:
             token_data = self.__to_token_data(datapoint["graph"])
         except Exception as ex:
@@ -648,7 +454,7 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
             return None
         node_labels, old_node_id_to_new, edges, reference_nodes = token_data
 
-        if len(node_labels) > self.__max_seq_size:
+        if len(node_labels) > self._max_seq_size:
             LOGGER.debug("Rejecting sample with %s tokens.", len(node_labels))
             return None
 
@@ -667,65 +473,41 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
             target_node_idx = None
 
         (
-            # Rewrites
-            target_rewrite_node_ids,
-            target_rewrites,
-            target_rewrite_to_location_group,
-            correct_rewrite_target,
-            text_rewrite_original_idx,
-            # VarMisuse
-            varmisused_node_ids,
-            candidate_symbol_to_varmisused_location,
-            candidate_symbol_node_ids,
-            correct_candidate_symbol_node,
-            varmisuse_rewrite_original_idx,
-            # Arg Swap
-            call_node_ids,
-            candidate_swapped_node_ids,
-            correct_swapped_pair,
-            swapped_pair_to_call,
-            swapped_rewrite_original_ids,
-            # All rewrites
-            repr_location_group_ids,
+            text_rewrite_selection_info,
+            varswap_rewrite_selection_info,
+            argswap_rewrite_selection_info,
+            num_rewrite_locations,
         ) = self._compute_rewrite_data(datapoint, candidate_node_idxs)
 
-        target_rewrite_node_ids = [old_node_id_to_new[n] for n in target_rewrite_node_ids]
-        varmisused_node_ids = [old_node_id_to_new[n] for n in varmisused_node_ids]
-        candidate_symbol_node_ids = [old_node_id_to_new[n] for n in candidate_symbol_node_ids]
-        call_node_ids = [old_node_id_to_new[n] for n in call_node_ids]
-        candidate_swapped_node_ids = [
-            (old_node_id_to_new[p1], old_node_id_to_new[p2]) for p1, p2 in candidate_swapped_node_ids
-        ]
+        # Rewrite node indices according to our project:
+        text_rewrite_selection_info = text_rewrite_selection_info._replace(
+            node_idxs=[old_node_id_to_new[n] for n in text_rewrite_selection_info.node_idxs]
+        )
+        varswap_rewrite_selection_info = varswap_rewrite_selection_info._replace(
+            node_idxs=[old_node_id_to_new[n] for n in varswap_rewrite_selection_info.node_idxs],
+            replacement_ids=[old_node_id_to_new[n] for n in varswap_rewrite_selection_info.replacement_ids],
+        )
+        argswap_rewrite_selection_info = argswap_rewrite_selection_info._replace(
+            node_idxs=[old_node_id_to_new[n] for n in argswap_rewrite_selection_info.node_idxs],
+            replacement_ids=[
+                (old_node_id_to_new[p1], old_node_id_to_new[p2])
+                for p1, p2 in argswap_rewrite_selection_info.replacement_ids
+            ],
+        )
 
         return SeqModelTensorizedSample(
-            target_subtokens_ids=[self.__token_embedder.tensorize(t) for t in node_labels],
+            input_token_ids=[self._token_embedder.tensorize(t) for t in node_labels],
             intra_token_edges=edges,
-            candidate_location_idxs=transformed_candidate_node_idxs,
-            target_location_idx=target_node_idx,
+            rewritable_loc_idxs=transformed_candidate_node_idxs,
+            rewritten_node_idx=target_node_idx,
             node_mappings=old_node_id_to_new,
-            ### Bug repair
-            # Text rewrite
-            target_rewrite_node_ids=target_rewrite_node_ids,
-            target_rewrites=target_rewrites,
-            target_rewrite_to_location_group=target_rewrite_to_location_group,
-            correct_rewrite_target=correct_rewrite_target,
-            text_rewrite_original_idx=text_rewrite_original_idx,
-            # Var Misuse
-            varmisused_node_ids=varmisused_node_ids,
-            candidate_symbol_node_ids=candidate_symbol_node_ids,
-            candidate_symbol_to_varmisused_node=candidate_symbol_to_varmisused_location,
-            correct_candidate_symbol_node=correct_candidate_symbol_node,
-            candidate_rewrite_original_idx=varmisuse_rewrite_original_idx,
-            # Arg Swap
-            call_node_ids=call_node_ids,
-            candidate_swapped_node_ids=candidate_swapped_node_ids,
-            swapped_pair_to_call=swapped_pair_to_call,
-            correct_swapped_pair=correct_swapped_pair,
-            pair_rewrite_original_idx=swapped_rewrite_original_ids,
-            # All rewrites
-            num_rewrite_locations_considered=len(repr_location_group_ids),
+            # Bug repair
+            text_rewrites_info=text_rewrite_selection_info,
+            varswap_rewrites_info=varswap_rewrite_selection_info,
+            argswap_rewrites_info=argswap_rewrite_selection_info,
+            num_rewrite_locations_considered=num_rewrite_locations,
             # Rewrite logprobs
-            rewrite_logprobs=datapoint.get("candidate_rewrite_logprobs", None),
+            observed_rewrite_logprobs=datapoint.get("candidate_rewrite_logprobs", None),
         )
 
     def initialize_minibatch(self) -> Dict[str, Any]:
@@ -733,60 +515,64 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
             "input_subtoken_ids": [],
             "edges": [],
             "edge_types": [],
-            "candidate_location_idxs": [],
-            "has_bug": [],
-            "target_location_idxs": [],
+            "rewritable_loc_idxs": [],
+            "sample_has_bug": [],
+            "sample_to_correct_loc_idx": [],
             "node_mappings": [],
             # Repair
             "mb_num_repair_groups": 0,
             "mb_num_rewrite_candidates": 0,
             # Text rewrites
-            "target_rewrite_node_ids": [],
-            "target_rewrites": [],
-            "rewrite_to_location_group": [],
-            "correct_rewrite_idxs": [],
+            "text_rewrite_tok_idxs": [],
+            "text_rewrite_replacement_ids": [],
+            "text_rewrite_to_loc_group": [],
+            "text_rewrite_correct_idxs": [],
             "text_rewrite_original_idxs": [],
-            "text_rewrite_idxs": [],
+            "text_rewrite_joint_idxs": [],
             # Var Misuse
-            "varmisused_node_ids": [],
-            "candidate_symbol_node_ids": [],
-            "candidate_symbol_to_location_group": [],
-            "correct_candidate_symbols": [],
-            "candidate_rewrite_original_idxs": [],
-            "candidate_rewrite_idxs": [],
+            "varswap_tok_idxs": [],
+            "varswap_replacement_tok_idxs": [],
+            "varswap_to_loc_group": [],
+            "varswap_correct_idxs": [],
+            "varswap_original_idxs": [],
+            "varswap_joint_idxs": [],
             # Arg Swaps
-            "call_node_ids": [],
-            "candidate_swapped_node_ids": [],
-            "swapped_pair_to_call_location_group": [],
-            "correct_swapped_pair": [],
-            "pair_rewrite_original_idx": [],
-            "pair_rewrite_idxs": [],
+            "argswap_tok_idxs": [],
+            "argswap_replacement_tok_idxs": [],
+            "argswap_to_loc_group": [],
+            "argswap_correct_idxs": [],
+            "argswap_original_idxs": [],
+            "argswap_joint_idxs": [],
             # Rewrite logprobs
-            "rewrite_to_graph_id": [],
-            "rewrite_logprobs": [],
-            "no_bug_rewrite_logprobs": [],
+            "rewrite_to_sample_id": [],
+            "observed_rewrite_logprobs": [],
+            "no_bug_observed_rewrite_logprobs": [],
         }
 
     def extend_minibatch_with(
         self, tensorized_datapoint: SeqModelTensorizedSample, partial_minibatch: Dict[str, Any]
     ) -> bool:
         current_sample_idx = len(partial_minibatch["input_subtoken_ids"])
-        partial_minibatch["input_subtoken_ids"].append(tensorized_datapoint.target_subtokens_ids)
 
+        partial_minibatch["input_subtoken_ids"].append(tensorized_datapoint.input_token_ids)
         for edge_type, adj_list in tensorized_datapoint.intra_token_edges.items():
-            partial_minibatch["edge_types"].extend(self.__edge_type_to_idx[edge_type] for _ in adj_list)
+            if edge_type not in self._edge_type_to_idx:
+                continue
+            partial_minibatch["edge_types"].extend(self._edge_type_to_idx[edge_type] for _ in adj_list)
             partial_minibatch["edges"].extend((current_sample_idx, f, t) for f, t in adj_list)
-
-        partial_minibatch["has_bug"].append(tensorized_datapoint.target_location_idx is not None)
-
         partial_minibatch["node_mappings"].append(tensorized_datapoint.node_mappings)
 
-        target_location_idx = tensorized_datapoint.target_location_idx or 0
-        partial_minibatch["target_location_idxs"].append(
-            target_location_idx + len(partial_minibatch["candidate_location_idxs"])
-        )
-        partial_minibatch["candidate_location_idxs"].extend(
-            (current_sample_idx, tid) for tid in tensorized_datapoint.candidate_location_idxs
+        if tensorized_datapoint.rewritten_node_idx is None:
+            partial_minibatch["sample_has_bug"].append(False)
+            partial_minibatch["sample_to_correct_loc_idx"].append(-10000)  # Marker for "not buggy"
+        else:
+            partial_minibatch["sample_has_bug"].append(True)
+            partial_minibatch["sample_to_correct_loc_idx"].append(
+                tensorized_datapoint.rewritten_node_idx + len(partial_minibatch["rewritable_loc_idxs"])
+            )
+
+        partial_minibatch["rewritable_loc_idxs"].extend(
+            (current_sample_idx, tid) for tid in tensorized_datapoint.rewritable_loc_idxs
         )
 
         mb_rewrite_candidate_offset = partial_minibatch["mb_num_rewrite_candidates"]
@@ -794,74 +580,79 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
         mb_num_repair_groups_offset = partial_minibatch["mb_num_repair_groups"]
 
         # Text rewrites
-        if tensorized_datapoint.correct_rewrite_target is not None:
-            partial_minibatch["correct_rewrite_idxs"].append(
-                tensorized_datapoint.correct_rewrite_target + len(partial_minibatch["target_rewrites"])
+        if tensorized_datapoint.text_rewrites_info.correct_choice_idx is not None:
+            partial_minibatch["text_rewrite_correct_idxs"].append(
+                tensorized_datapoint.text_rewrites_info.correct_choice_idx
+                + len(partial_minibatch["text_rewrite_to_loc_group"])
             )
-        partial_minibatch["target_rewrite_node_ids"].extend(
-            (current_sample_idx, t) for t in tensorized_datapoint.target_rewrite_node_ids
+        partial_minibatch["text_rewrite_tok_idxs"].extend(
+            (current_sample_idx, t) for t in tensorized_datapoint.text_rewrites_info.node_idxs
         )
-        partial_minibatch["target_rewrites"].extend(tensorized_datapoint.target_rewrites)
-        partial_minibatch["rewrite_to_location_group"].extend(
-            t + mb_num_repair_groups_offset for t in tensorized_datapoint.target_rewrite_to_location_group
+        partial_minibatch["text_rewrite_replacement_ids"].extend(
+            tensorized_datapoint.text_rewrites_info.replacement_ids
         )
-        partial_minibatch["text_rewrite_idxs"].extend(
-            t + mb_rewrite_candidate_offset for t in tensorized_datapoint.text_rewrite_original_idx
+        partial_minibatch["text_rewrite_to_loc_group"].extend(
+            t + mb_num_repair_groups_offset for t in tensorized_datapoint.text_rewrites_info.loc_groups
         )
-        num_rewrite_candidates_in_datapoint += len(tensorized_datapoint.text_rewrite_original_idx)
+        partial_minibatch["text_rewrite_joint_idxs"].extend(
+            t + mb_rewrite_candidate_offset for t in tensorized_datapoint.text_rewrites_info.original_idxs
+        )
+        num_rewrite_candidates_in_datapoint += len(tensorized_datapoint.text_rewrites_info.original_idxs)
 
-        # Var misuse
-        if tensorized_datapoint.correct_candidate_symbol_node is not None:
-            partial_minibatch["correct_candidate_symbols"].append(
-                tensorized_datapoint.correct_candidate_symbol_node
-                + len(partial_minibatch["candidate_symbol_to_location_group"])
+        # Var Misuse
+        if tensorized_datapoint.varswap_rewrites_info.correct_choice_idx is not None:
+            partial_minibatch["varswap_correct_idxs"].append(
+                tensorized_datapoint.varswap_rewrites_info.correct_choice_idx
+                + len(partial_minibatch["varswap_to_loc_group"])
             )
-        partial_minibatch["varmisused_node_ids"].extend(
-            (current_sample_idx, t) for t in tensorized_datapoint.varmisused_node_ids
+        partial_minibatch["varswap_tok_idxs"].extend(
+            (current_sample_idx, t) for t in tensorized_datapoint.varswap_rewrites_info.node_idxs
         )
-        partial_minibatch["candidate_symbol_node_ids"].extend(
-            (current_sample_idx, t) for t in tensorized_datapoint.candidate_symbol_node_ids
+        partial_minibatch["varswap_replacement_tok_idxs"].extend(
+            (current_sample_idx, t) for t in tensorized_datapoint.varswap_rewrites_info.replacement_ids
         )
-        partial_minibatch["candidate_symbol_to_location_group"].extend(
-            t + mb_num_repair_groups_offset for t in tensorized_datapoint.candidate_symbol_to_varmisused_node
+        partial_minibatch["varswap_to_loc_group"].extend(
+            t + mb_num_repair_groups_offset for t in tensorized_datapoint.varswap_rewrites_info.loc_groups
         )
-        partial_minibatch["candidate_rewrite_idxs"].extend(
-            t + mb_rewrite_candidate_offset for t in tensorized_datapoint.candidate_rewrite_original_idx
+        partial_minibatch["varswap_joint_idxs"].extend(
+            t + mb_rewrite_candidate_offset for t in tensorized_datapoint.varswap_rewrites_info.original_idxs
         )
-        num_rewrite_candidates_in_datapoint += len(tensorized_datapoint.candidate_rewrite_original_idx)
+        num_rewrite_candidates_in_datapoint += len(tensorized_datapoint.varswap_rewrites_info.original_idxs)
 
         # Arg Swaps
-        if tensorized_datapoint.correct_swapped_pair is not None:
-            partial_minibatch["correct_swapped_pair"].append(
-                tensorized_datapoint.correct_swapped_pair
-                + len(partial_minibatch["swapped_pair_to_call_location_group"])
+        if tensorized_datapoint.argswap_rewrites_info.correct_choice_idx is not None:
+            partial_minibatch["argswap_correct_idxs"].append(
+                tensorized_datapoint.argswap_rewrites_info.correct_choice_idx
+                + len(partial_minibatch["argswap_to_loc_group"])
             )
-        partial_minibatch["call_node_ids"].extend((current_sample_idx, t) for t in tensorized_datapoint.call_node_ids)
-        partial_minibatch["candidate_swapped_node_ids"].extend(
-            (current_sample_idx, t1, t2) for t1, t2 in tensorized_datapoint.candidate_swapped_node_ids
+        partial_minibatch["argswap_tok_idxs"].extend(
+            (current_sample_idx, t) for t in tensorized_datapoint.argswap_rewrites_info.node_idxs
         )
-        partial_minibatch["swapped_pair_to_call_location_group"].extend(
-            t + mb_num_repair_groups_offset for t in tensorized_datapoint.swapped_pair_to_call
+        partial_minibatch["argswap_replacement_tok_idxs"].extend(
+            (current_sample_idx, t1, t2) for t1, t2 in tensorized_datapoint.argswap_rewrites_info.replacement_ids
         )
-        partial_minibatch["pair_rewrite_idxs"].extend(
-            t + mb_rewrite_candidate_offset for t in tensorized_datapoint.pair_rewrite_original_idx
+        partial_minibatch["argswap_to_loc_group"].extend(
+            t + mb_num_repair_groups_offset for t in tensorized_datapoint.argswap_rewrites_info.loc_groups
         )
-        num_rewrite_candidates_in_datapoint += len(tensorized_datapoint.pair_rewrite_original_idx)
+        partial_minibatch["argswap_joint_idxs"].extend(
+            t + mb_rewrite_candidate_offset for t in tensorized_datapoint.argswap_rewrites_info.original_idxs
+        )
+        num_rewrite_candidates_in_datapoint += len(tensorized_datapoint.argswap_rewrites_info.original_idxs)
         partial_minibatch["mb_num_rewrite_candidates"] += num_rewrite_candidates_in_datapoint
 
         partial_minibatch["mb_num_repair_groups"] += tensorized_datapoint.num_rewrite_locations_considered
 
         # Visualization info
-        partial_minibatch["text_rewrite_original_idxs"].append(tensorized_datapoint.text_rewrite_original_idx)
-        partial_minibatch["candidate_rewrite_original_idxs"].append(tensorized_datapoint.candidate_rewrite_original_idx)
-        partial_minibatch["pair_rewrite_original_idx"].append(tensorized_datapoint.pair_rewrite_original_idx)
+        partial_minibatch["text_rewrite_original_idxs"].append(tensorized_datapoint.text_rewrites_info.original_idxs)
+        partial_minibatch["varswap_original_idxs"].append(tensorized_datapoint.varswap_rewrites_info.original_idxs)
+        partial_minibatch["argswap_original_idxs"].append(tensorized_datapoint.argswap_rewrites_info.original_idxs)
 
         # Rewrite logprobs
-        partial_minibatch["rewrite_to_graph_id"].extend([current_sample_idx] * num_rewrite_candidates_in_datapoint)
-        logprobs = tensorized_datapoint.rewrite_logprobs
+        partial_minibatch["rewrite_to_sample_id"].extend([current_sample_idx] * num_rewrite_candidates_in_datapoint)
+        logprobs = tensorized_datapoint.observed_rewrite_logprobs
         if logprobs is not None:
-            partial_minibatch["rewrite_logprobs"].extend(logprobs[:-1])
-            partial_minibatch["no_bug_rewrite_logprobs"].append(logprobs[-1])
+            partial_minibatch["observed_rewrite_logprobs"].extend(logprobs[:-1])
+            partial_minibatch["no_bug_observed_rewrite_logprobs"].append(logprobs[-1])
 
         return True
 
@@ -869,7 +660,7 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
         self, accumulated_minibatch_data: Dict[str, Any], device: Union[str, torch.device]
     ) -> Dict[str, Any]:
         max_len = max(len(t) for t in accumulated_minibatch_data["input_subtoken_ids"])
-        max_subtokens = self.__token_embedder.max_num_subtokens
+        max_subtokens = self._token_embedder.max_num_subtokens
         num_samples = len(accumulated_minibatch_data["input_subtoken_ids"])
         input_sequence_ids = np.zeros((num_samples, max_len, max_subtokens), dtype=np.int32)
         input_seq_num_subtokens = np.ones((num_samples, max_len), dtype=np.int32)
@@ -883,149 +674,96 @@ class SeqBugLabModel(AbstractNeuralModel[BugLabData, SeqModelTensorizedSample, S
                 input_sequence_ids[i, j, :num_subtokens] = subtokens[:num_subtokens]
                 input_seq_num_subtokens[i, j] = num_subtokens
 
+        def make_tensor(data, dtype, empty_shape):
+            if len(data) > 0:
+                return torch.tensor(data, dtype=dtype, device=device)
+            else:
+                return torch.zeros(size=empty_shape, dtype=dtype, device=device)
+
         minibatch = {
             "input_sequence_ids": torch.tensor(input_sequence_ids, dtype=torch.int64, device=device),
             "input_seq_num_subtokens": torch.tensor(input_seq_num_subtokens, dtype=torch.int64, device=device),
             "token_sequence_lengths": torch.tensor(token_seq_lengths, dtype=torch.int64, device=device),
             "edges": torch.tensor(accumulated_minibatch_data["edges"], dtype=torch.int64, device=device),
             "edge_types": torch.tensor(accumulated_minibatch_data["edge_types"], dtype=torch.int64, device=device),
-            "has_bug": torch.tensor(accumulated_minibatch_data["has_bug"], dtype=torch.bool, device=device),
-            "target_location_idxs": torch.tensor(
-                accumulated_minibatch_data["target_location_idxs"], dtype=torch.int64, device=device
+            "sample_has_bug": torch.tensor(
+                accumulated_minibatch_data["sample_has_bug"], dtype=torch.bool, device=device
             ),
-            "candidate_location_idxs": torch.tensor(
-                accumulated_minibatch_data["candidate_location_idxs"], dtype=torch.int64, device=device
+            "sample_to_correct_loc_idx": torch.tensor(
+                accumulated_minibatch_data["sample_to_correct_loc_idx"], dtype=torch.int64, device=device
+            ),
+            "rewritable_loc_idxs": torch.tensor(
+                accumulated_minibatch_data["rewritable_loc_idxs"], dtype=torch.int64, device=device
             ),
             "node_mappings": accumulated_minibatch_data["node_mappings"],
             # Text Rewrite
-            "target_rewrite_node_ids": torch.tensor(
-                accumulated_minibatch_data["target_rewrite_node_ids"], dtype=torch.int64, device=device
+            "text_rewrite_tok_idxs": make_tensor(
+                accumulated_minibatch_data["text_rewrite_tok_idxs"], dtype=torch.int64, empty_shape=(0, 2)
             ),
-            "target_rewrites": torch.tensor(
-                accumulated_minibatch_data["target_rewrites"], dtype=torch.int64, device=device
+            "text_rewrite_replacement_ids": make_tensor(
+                accumulated_minibatch_data["text_rewrite_replacement_ids"], dtype=torch.int64, empty_shape=(0,)
             ),
-            "rewrite_to_location_group": torch.tensor(
-                accumulated_minibatch_data["rewrite_to_location_group"], dtype=torch.int64, device=device
+            "text_rewrite_to_loc_group": make_tensor(
+                accumulated_minibatch_data["text_rewrite_to_loc_group"], dtype=torch.int64, empty_shape=(0,)
             ),
-            "correct_rewrite_idxs": torch.tensor(
-                accumulated_minibatch_data["correct_rewrite_idxs"], dtype=torch.int64, device=device
+            "text_rewrite_correct_idxs": make_tensor(
+                accumulated_minibatch_data["text_rewrite_correct_idxs"], dtype=torch.int64, empty_shape=(0,)
+            ),
+            "text_rewrite_joint_idxs": torch.tensor(
+                accumulated_minibatch_data["text_rewrite_joint_idxs"], dtype=torch.int64, device=device
             ),
             # Var Misuse
-            "varmisused_node_ids": torch.tensor(
-                accumulated_minibatch_data["varmisused_node_ids"], dtype=torch.int64, device=device
+            "varswap_tok_idxs": make_tensor(
+                accumulated_minibatch_data["varswap_tok_idxs"], dtype=torch.int64, empty_shape=(0, 2)
             ),
-            "candidate_symbol_node_ids": torch.tensor(
-                accumulated_minibatch_data["candidate_symbol_node_ids"], dtype=torch.int64, device=device
+            "varswap_replacement_tok_idxs": make_tensor(
+                accumulated_minibatch_data["varswap_replacement_tok_idxs"], dtype=torch.int64, empty_shape=(0, 2)
             ),
-            "candidate_symbol_to_location_group": torch.tensor(
-                accumulated_minibatch_data["candidate_symbol_to_location_group"], dtype=torch.int64, device=device
+            "varswap_to_loc_group": make_tensor(
+                accumulated_minibatch_data["varswap_to_loc_group"], dtype=torch.int64, empty_shape=(0,)
             ),
-            "correct_candidate_symbols": torch.tensor(
-                accumulated_minibatch_data["correct_candidate_symbols"], dtype=torch.int64, device=device
+            "varswap_correct_idxs": make_tensor(
+                accumulated_minibatch_data["varswap_correct_idxs"], dtype=torch.int64, empty_shape=(0,)
+            ),
+            "varswap_joint_idxs": torch.tensor(
+                accumulated_minibatch_data["varswap_joint_idxs"], dtype=torch.int64, device=device
             ),
             # Arg Swap
-            "call_node_ids": torch.tensor(
-                accumulated_minibatch_data["call_node_ids"], dtype=torch.int64, device=device
+            "argswap_tok_idxs": make_tensor(
+                accumulated_minibatch_data["argswap_tok_idxs"], dtype=torch.int64, empty_shape=(0, 2)
             ),
-            "candidate_swapped_node_ids": torch.tensor(
-                accumulated_minibatch_data["candidate_swapped_node_ids"], dtype=torch.int64, device=device
+            "argswap_replacement_tok_idxs": make_tensor(
+                accumulated_minibatch_data["argswap_replacement_tok_idxs"], dtype=torch.int64, empty_shape=(0, 3)
             ),
-            "swapped_pair_to_call_location_group": torch.tensor(
-                accumulated_minibatch_data["swapped_pair_to_call_location_group"], dtype=torch.int64, device=device
+            "argswap_to_loc_group": make_tensor(
+                accumulated_minibatch_data["argswap_to_loc_group"], dtype=torch.int64, empty_shape=(0,)
             ),
-            "correct_swapped_pair": torch.tensor(
-                accumulated_minibatch_data["correct_swapped_pair"], dtype=torch.int64, device=device
+            "argswap_correct_idxs": make_tensor(
+                accumulated_minibatch_data["argswap_correct_idxs"], dtype=torch.int64, empty_shape=(0,)
+            ),
+            "argswap_joint_idxs": torch.tensor(
+                accumulated_minibatch_data["argswap_joint_idxs"], dtype=torch.int64, device=device
             ),
             # Visualisation info
             "text_rewrite_original_idxs": accumulated_minibatch_data["text_rewrite_original_idxs"],
-            "candidate_rewrite_original_idxs": accumulated_minibatch_data["candidate_rewrite_original_idxs"],
-            "pair_rewrite_original_idx": accumulated_minibatch_data["pair_rewrite_original_idx"],
-            # Rewrite info
-            "text_rewrite_idxs": torch.tensor(
-                accumulated_minibatch_data["text_rewrite_idxs"], dtype=torch.int64, device=device
-            ),
-            "candidate_rewrite_idxs": torch.tensor(
-                accumulated_minibatch_data["candidate_rewrite_idxs"], dtype=torch.int64, device=device
-            ),
-            "pair_rewrite_idxs": torch.tensor(
-                accumulated_minibatch_data["pair_rewrite_idxs"], dtype=torch.int64, device=device
-            ),
+            "varswap_original_idxs": accumulated_minibatch_data["varswap_original_idxs"],
+            "argswap_original_idxs": accumulated_minibatch_data["argswap_original_idxs"],
             # Rewrite logprobs
-            "rewrite_to_graph_id": torch.tensor(
-                accumulated_minibatch_data["rewrite_to_graph_id"], dtype=torch.int64, device=device
+            "rewrite_to_sample_id": torch.tensor(
+                accumulated_minibatch_data["rewrite_to_sample_id"], dtype=torch.int64, device=device
             ),
         }
 
         # Rewrite logprobs
-        if accumulated_minibatch_data["rewrite_logprobs"]:
-            rewrite_logprobs = (
-                accumulated_minibatch_data["rewrite_logprobs"] + accumulated_minibatch_data["no_bug_rewrite_logprobs"]
+        if accumulated_minibatch_data["observed_rewrite_logprobs"]:
+            observed_rewrite_logprobs = (
+                accumulated_minibatch_data["observed_rewrite_logprobs"]
+                + accumulated_minibatch_data["no_bug_observed_rewrite_logprobs"]
             )
-            minibatch["rewrite_logprobs"] = torch.tensor(rewrite_logprobs, dtype=torch.float32, device=device)
-            minibatch["rewrite_to_graph_id"] = torch.tensor(
-                accumulated_minibatch_data["rewrite_to_graph_id"], dtype=torch.int64, device=device
+            minibatch["observed_rewrite_logprobs"] = torch.tensor(
+                observed_rewrite_logprobs, dtype=torch.float32, device=device
+            )
+            minibatch["rewrite_to_sample_id"] = torch.tensor(
+                accumulated_minibatch_data["rewrite_to_sample_id"], dtype=torch.int64, device=device
             )
         return minibatch
-
-    def predict(
-        self, data: Iterator[BugLabData], trained_nn: SeqBugLabModule, device, parallelize: bool
-    ) -> Iterator[Tuple[BugLabData, Dict[int, float], List[float]]]:
-        trained_nn.eval()
-        with torch.no_grad(), self._tensorize_all_location_rewrites():
-            for mb_data, original_datapoints in self.minibatch_iterator(
-                self.tensorize_dataset(data, return_input_data=True, parallelize=parallelize),
-                device,
-                max_minibatch_size=50,
-                parallelize=parallelize,
-            ):
-                num_samples = mb_data["input_sequence_ids"].shape[0]
-
-                output_representation = trained_nn._compute_output_representation(
-                    mb_data["input_sequence_ids"],
-                    mb_data["input_seq_num_subtokens"],
-                    mb_data["token_sequence_lengths"],
-                    mb_data["edges"],
-                    mb_data["edge_types"],
-                )
-
-                candidate_location_idxs = mb_data["candidate_location_idxs"]
-
-                target_location_representations = output_representation[
-                    candidate_location_idxs[:, 0], candidate_location_idxs[:, 1]
-                ]  # [num_candidate_points, H]
-
-                # Quick sanity check:
-                # torch.exp(torch_scatter.scatter_logsumexp(candidate_log_probs, candidate_to_sample_idx))
-                # should be ones.
-                candidate_to_sample_idx, candidate_log_probs = trained_nn._compute_localization_logprobs(
-                    target_location_representations, candidate_location_idxs[:, 0], num_samples
-                )
-
-                # Repair
-                arg_swap_logprobs, text_repair_logprobs, varmisuse_logprobs = trained_nn._compute_repair_logprobs(
-                    output_representation,
-                    mb_data["target_rewrite_node_ids"],
-                    mb_data["target_rewrites"],
-                    mb_data["rewrite_to_location_group"],
-                    mb_data["varmisused_node_ids"],
-                    mb_data["candidate_symbol_node_ids"],
-                    mb_data["candidate_symbol_to_location_group"],
-                    mb_data["call_node_ids"],
-                    mb_data["candidate_swapped_node_ids"],
-                    mb_data["swapped_pair_to_call_location_group"],
-                )
-
-                candidate_to_sample_idx = candidate_to_sample_idx.cpu().numpy()
-                candidate_log_probs = candidate_log_probs.cpu().numpy()
-
-                yield from self._iter_per_sample_results(
-                    mb_data,
-                    candidate_to_sample_idx,
-                    candidate_log_probs,
-                    arg_swap_logprobs,
-                    num_samples,
-                    original_datapoints,
-                    text_repair_logprobs,
-                    varmisuse_logprobs,
-                    node_mappings=mb_data["node_mappings"],
-                )
