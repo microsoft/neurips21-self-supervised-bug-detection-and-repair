@@ -4,7 +4,7 @@ import torch
 import torch_scatter
 from ptgnn.baseneuralmodel import AbstractScheduler
 from torch.optim.lr_scheduler import LambdaLR
-from torch_scatter import scatter_max, scatter_sum
+from torch_scatter import scatter_max, scatter_sum, scatter_min
 
 
 def scatter_log_softmax(
