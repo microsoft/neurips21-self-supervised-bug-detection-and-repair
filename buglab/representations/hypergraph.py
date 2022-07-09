@@ -321,6 +321,7 @@ def convert_control_flow_edges(graph):
         )
 
 def trivially_convert_edges(graph):
+    graph["hyperedges"] = []
     for edge_t, edges in graph["edges"].items():
         for u, v in edges:
             graph["hyperedges"].append({
