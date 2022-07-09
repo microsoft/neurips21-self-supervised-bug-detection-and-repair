@@ -9,6 +9,7 @@ Usage:
 Options:
     -h --help                    Show this screen.
     --chunk-size CS              NextToken might be large, so we split it into chunks of size `--chunk-size`. [default: 255]
+    --trivial                    Each edge (a, b) of type T becomes hyperedge {'n1': a, 'n2': b} of type T
     --sequential
 """
 import multiprocessing
@@ -32,7 +33,7 @@ def convert_file(input_file, target_folder, conversion_fn):
                     continue
                 try:
                     assert len(graph["graph"]["edges"]) != 0
-                    hypergraph = conversion_fn(graph, chunk_size=int(args["--chunk-size"]))
+                    hypergraph = conversion_fn(graph, chunk_size=int(args["--chunk-size"]), trivially_edge_to_hyperedge=args['--trivial'])
                     assert len(hypergraph["graph"]["edges"]) == 0
                     yield hypergraph
                 except Exception as e:
