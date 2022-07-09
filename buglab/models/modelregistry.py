@@ -11,11 +11,8 @@ from ptgnn.neuralmodels.gnn import GraphNeuralNetworkModel
 from buglab.models.gnn import GnnBugLabModel
 from buglab.models.gnnlayerdefs import (
     create_ggnn_mp_layers,
-    create_hybrid_mp_layers,
     create_mlp_mp_layers,
-    create_mlp_mp_layers_no_residual,
     create_sandwich_mlp_mp_layers,
-    create_sandwich_mlp_mp_layers_no_residual,
 )
 from buglab.models.hypergnn import HyperGnnModel
 from buglab.models.layers.HGNN import HGNNModel
