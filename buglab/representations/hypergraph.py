@@ -326,12 +326,12 @@ def trivially_convert_edges(graph):
     for h_edge in graph["hyperedges"]:
         arg_nodes = h_edge["args"]
         if "$rval" not in arg_nodes:
-            print(f"NO ARGUMENT RVAL, skipping edge {h_edge}")
-            # new_hyperedges.append(h_edge)
+            print(f"NO ARGUMENT RVAL, simply adding edge {h_edge}")
+            new_hyperedges.append(h_edge)
             continue
         if len(arg_nodes["$rval"]) != 1:
-            print(f"SEVERAL RVALS, skipping edge {h_edge}")
-            # new_hyperedges.append(h_edge)
+            print(f"SEVERAL RVALS, adding edge {h_edge}")
+            new_hyperedges.append(h_edge)
             continue
 
         rval = arg_nodes["$rval"][0]
