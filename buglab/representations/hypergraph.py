@@ -321,8 +321,56 @@ def convert_control_flow_edges(graph):
         )
 
 def trivially_convert_edges(graph):
-    graph["hyperedges"] = []
+    # breakpoint()
+    new_hyperedges = []
+    for h_edge in graph["hyperedges"]:
+        arg_nodes = h_edge["args"]
+        if "$rval" not in arg_nodes:
+            print(f"NO ARGUMENT RVAL, skipping edge {h_edge}")
+            # new_hyperedges.append(h_edge)
+            continue
+        if len(arg_nodes["$rval"]) != 1:
+            print(f"SEVERAL RVALS, skipping edge {h_edge}")
+            # new_hyperedges.append(h_edge)
+            continue
+
+        rval = arg_nodes["$rval"][0]
+        # If it is the special kind of astchild, treat it specially
+        if (
+            h_edge["name"] == "$AstChild"
+            and "func" in h_edge["args"]
+            and "args" in h_edge["args"]
+        ):
+            for func in h_edge["args"]["func"]:
+                for arg in h_edge["args"]["args"]:
+                    new_hyperedges.append({
+                        "name": h_edge["name"],
+                        "docstring": h_edge["docstring"],
+                        "args": {
+                            "$rval": [rval],
+                            "func": [func],
+                            "args": [arg],
+                        }
+                    })
+            continue
+
+        # Otherwise binarise the hyperedge
+        for argname, argids in arg_nodes.items():
+            if argname == "$rval":
+                continue
+            for argid in argids:
+                new_hyperedges.append({
+                    "name": h_edge["name"],
+                    "docstring": h_edge["docstring"],
+                    "args": {
+                        "n1": [rval],
+                        "n2": [argid],
+                    }
+                })
+
+    graph["hyperedges"] = new_hyperedges
     for edge_t, edges in graph["edges"].items():
+        assert edge_t != '$AstChild'
         for u, v in edges:
             graph["hyperedges"].append({
                 "name": edge_t,
@@ -332,6 +380,7 @@ def trivially_convert_edges(graph):
                     "n2": [v],
                 }
             })
+
     for edge_t in list(graph["edges"].keys()):
         del graph["edges"][edge_t]
 
