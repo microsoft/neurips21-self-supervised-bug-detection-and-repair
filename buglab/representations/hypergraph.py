@@ -1,6 +1,6 @@
 from typing import Callable, Dict, List, Set, Tuple, Union
 
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 from buglab.representations.data import BugLabData, BugLabGraph, TypeAnnotationData
 from buglab.utils.msgpackutils import load_msgpack_l_gz
@@ -43,9 +43,13 @@ def convert_buglab_sample_to_hypergraph(
     datapoint: BugLabData,
     token_sequence_as_one_hyperedge: bool = True,
     chunk_size: int = 255,
+    trivially_edge_to_hyperedge: bool = False,
 ) -> BugLabData:
     new_graph, node_mapping = convert_to_hypergraph(
-        datapoint["graph"], token_sequence_as_one_hyperedge, chunk_size=chunk_size
+        datapoint["graph"],
+        token_sequence_as_one_hyperedge,
+        chunk_size=chunk_size,
+        trivially_edge_to_hyperedge=trivially_edge_to_hyperedge,
     )
 
     candidate_rewrite_metadata = []
@@ -91,6 +95,7 @@ def convert_to_hypergraph(
     graph: BugLabGraph,
     token_sequence_as_one_hyperedge: bool = True,
     chunk_size: int = 256,
+    trivially_edge_to_hyperedge: bool = False,
 ) -> Union[BugLabGraph, Callable[[int], int]]:
     next_siblings = dict(graph["edges"]["Sibling"]) if "Sibling" in graph["edges"] else {}
     prev_sibling = {v: k for k, v in next_siblings.items()}
@@ -102,9 +107,12 @@ def convert_to_hypergraph(
         except KeyError:
             pass
 
-    convert_dataflow_edges(graph)
-    convert_control_flow_edges(graph)
-    convert_token_sequence(graph, token_sequence_as_one_hyperedge, chunk_size=chunk_size)
+    if trivially_edge_to_hyperedge:
+        trivially_convert_edges(graph)
+    else:
+        convert_dataflow_edges(graph)
+        convert_control_flow_edges(graph)
+        convert_token_sequence(graph, token_sequence_as_one_hyperedge, chunk_size=chunk_size)
 
     # Update AST hyperedges
     def map_hyperedge(hyperedge):
@@ -311,6 +319,70 @@ def convert_control_flow_edges(graph):
                 "args": {"next": list(next_states), "prev": list(prev_states)},
             }
         )
+
+def trivially_convert_edges(graph):
+    # breakpoint()
+    new_hyperedges = []
+    for h_edge in graph["hyperedges"]:
+        arg_nodes = h_edge["args"]
+        if "$rval" not in arg_nodes:
+            print(f"NO ARGUMENT RVAL, simply adding edge {h_edge}")
+            new_hyperedges.append(h_edge)
+            continue
+        if len(arg_nodes["$rval"]) != 1:
+            print(f"SEVERAL RVALS, adding edge {h_edge}")
+            new_hyperedges.append(h_edge)
+            continue
+
+        rval = arg_nodes["$rval"][0]
+        # If it is the special kind of astchild, treat it specially
+        if (
+            h_edge["name"] == "$AstChild"
+            and "func" in h_edge["args"]
+            and "args" in h_edge["args"]
+        ):
+            for func in h_edge["args"]["func"]:
+                for arg in h_edge["args"]["args"]:
+                    new_hyperedges.append({
+                        "name": h_edge["name"],
+                        "docstring": h_edge["docstring"],
+                        "args": {
+                            "$rval": [rval],
+                            "func": [func],
+                            "args": [arg],
+                        }
+                    })
+            continue
+
+        # Otherwise binarise the hyperedge
+        for argname, argids in arg_nodes.items():
+            if argname == "$rval":
+                continue
+            for argid in argids:
+                new_hyperedges.append({
+                    "name": h_edge["name"],
+                    "docstring": h_edge["docstring"],
+                    "args": {
+                        "n1": [rval],
+                        "n2": [argid],
+                    }
+                })
+
+    graph["hyperedges"] = new_hyperedges
+    for edge_t, edges in graph["edges"].items():
+        assert edge_t != '$AstChild'
+        for u, v in edges:
+            graph["hyperedges"].append({
+                "name": edge_t,
+                "docstring": None,
+                "args": {
+                    "n1": [u],
+                    "n2": [v],
+                }
+            })
+
+    for edge_t in list(graph["edges"].keys()):
+        del graph["edges"][edge_t]
 
 
 if __name__ == "__main__":
